@@ -1,0 +1,29 @@
+# Secrets and sensitive data
+.env
+data/detections.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+data/extracted.json
+data/foundstone.db
+data/foundstone.db-shm
+data/foundstone.db-wal
+ui/node_modules/
+ui/dist/

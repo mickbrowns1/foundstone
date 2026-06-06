@@ -1,0 +1,12 @@
+services:
+  foundstone:
+    build: .
+    ports:
+      - "8080:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./.env:/app/.env
+      # Mount data/ so the SQLite DB and uploaded templates persist across rebuilds
+      - ./data:/app/data
+    restart: unless-stopped
