@@ -27,3 +27,4 @@ data/foundstone.db-shm
 data/foundstone.db-wal
 ui/node_modules/
 ui/dist/
+.DS_Store

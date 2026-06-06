@@ -1,0 +1,100 @@
+name: Security Scans
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    # Run weekly on Monday at 08:00 UTC
+    - cron: "0 8 * * 1"
+
+jobs:
+  trufflehog:
+    name: TruffleHog — Secret Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so TruffleHog can scan all commits
+
+      - name: Run TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+
+  bandit:
+    name: Bandit — Python SAST
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Bandit
+        run: pip install bandit[toml]
+
+      - name: Run Bandit
+        run: |
+          bandit -r api.py foundstone/ \
+            --severity-level medium \
+            --confidence-level medium \
+            --format json \
+            --output bandit-report.json \
+            || true
+
+      - name: Upload Bandit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+      - name: Fail on high severity findings
+        run: |
+          bandit -r api.py foundstone/ \
+            --severity-level high \
+            --confidence-level high \
+            --exit-zero
+
+  osv-scanner:
+    name: OSV Scanner — Dependency Vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run OSV Scanner (Python)
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: |-
+            --lockfile=requirements.txt
+            --format=sarif
+            --output=osv-python.sarif
+        continue-on-error: true
+
+      - name: Run OSV Scanner (npm)
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: |-
+            --lockfile=ui/package-lock.json
+            --format=sarif
+            --output=osv-npm.sarif
+        continue-on-error: true
+
+      - name: Upload OSV Python SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: osv-python.sarif
+          category: osv-python
+        if: always()
+
+      - name: Upload OSV npm SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: osv-npm.sarif
+          category: osv-npm
+        if: always()
