@@ -6,7 +6,6 @@ on:
   pull_request:
     branches: ["main"]
   schedule:
-    # Run weekly on Monday at 08:00 UTC
     - cron: "0 8 * * 1"
 
 jobs:
@@ -16,14 +15,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history so TruffleHog can scan all commits
+          fetch-depth: 0
 
-      - name: Run TruffleHog
+      - name: Run TruffleHog (PR)
+        if: github.event_name == 'pull_request'
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
+          base: ${{ github.event.pull_request.base.sha }}
+          head: ${{ github.event.pull_request.head.sha }}
+          extra_args: --only-verified
+
+      - name: Run TruffleHog (push / schedule — full scan)
+        if: github.event_name != 'pull_request'
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
           extra_args: --only-verified
 
   bandit:
@@ -39,14 +46,13 @@ jobs:
       - name: Install Bandit
         run: pip install bandit[toml]
 
-      - name: Run Bandit
+      - name: Run Bandit (full report)
         run: |
           bandit -r api.py foundstone/ \
             --severity-level medium \
             --confidence-level medium \
             --format json \
-            --output bandit-report.json \
-            || true
+            --output bandit-report.json || true
 
       - name: Upload Bandit report
         uses: actions/upload-artifact@v4
@@ -58,8 +64,7 @@ jobs:
         run: |
           bandit -r api.py foundstone/ \
             --severity-level high \
-            --confidence-level high \
-            --exit-zero
+            --confidence-level high
 
   osv-scanner:
     name: OSV Scanner — Dependency Vulnerabilities
@@ -67,34 +72,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run OSV Scanner (Python)
-        uses: google/osv-scanner-action@v1
-        with:
-          scan-args: |-
-            --lockfile=requirements.txt
-            --format=sarif
-            --output=osv-python.sarif
+      - name: Install OSV Scanner
+        run: |
+          curl -fsSL https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_amd64 \
+            -o /usr/local/bin/osv-scanner
+          chmod +x /usr/local/bin/osv-scanner
+
+      - name: Scan Python dependencies
+        run: |
+          osv-scanner --lockfile=requirements.txt --format=table
         continue-on-error: true
 
-      - name: Run OSV Scanner (npm)
-        uses: google/osv-scanner-action@v1
-        with:
-          scan-args: |-
-            --lockfile=ui/package-lock.json
-            --format=sarif
-            --output=osv-npm.sarif
+      - name: Scan npm dependencies
+        run: |
+          osv-scanner --lockfile=ui/package-lock.json --format=table
         continue-on-error: true
 
-      - name: Upload OSV Python SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: osv-python.sarif
-          category: osv-python
-        if: always()
+      - name: Fail on critical vulnerabilities (Python)
+        run: |
+          osv-scanner --lockfile=requirements.txt
 
-      - name: Upload OSV npm SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: osv-npm.sarif
-          category: osv-npm
-        if: always()
+      - name: Fail on critical vulnerabilities (npm)
+        run: |
+          osv-scanner --lockfile=ui/package-lock.json
