@@ -51,6 +51,11 @@ def ingest_events(
         return True
 
     now_ms = int(time.time() * 1000)
+    # addEvents requires nanoseconds since epoch -- a millisecond `ts` is
+    # silently accepted (HTTP 200, "status": "success") but never actually
+    # indexed (bytesCharged: 0), so every ingest looked successful while
+    # dropping the event.
+    now_ns = now_ms * 1_000_000
     session_name = f"foundstone-{now_ms}"
     if session_tag:
         session_name = f"{session_name}-{session_tag}"
@@ -58,7 +63,7 @@ def ingest_events(
     # Build the SDL addEvents payload
     sdl_events = [
         {
-            "ts": str(now_ms + i),  # slight offset so events are ordered
+            "ts": str(now_ns + i * 1_000_000),  # 1ms (in ns) offset so events are ordered
             "attrs": _clean_attrs(event),
         }
         for i, event in enumerate(events)
@@ -78,6 +83,20 @@ def ingest_events(
         resp.raise_for_status()
     except requests.RequestException as exc:
         log.error("addEvents failed: %s", exc)
+        return False
+
+    # SDL can return HTTP 200 + "status": "success" while silently dropping
+    # every event (e.g. a bad `ts` unit) -- a non-empty "warnings" list means
+    # nothing was actually indexed, so treat that as a failure instead of
+    # reporting a false "ingested". (NOTE: "bytesCharged" is NOT a reliable
+    # signal here -- it reads 0 on both successful and dropped ingests.)
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    warnings = body.get("warnings") or []
+    if warnings:
+        log.error("addEvents reported warnings (event(s) likely NOT indexed): %s", warnings)
         return False
 
     log.info("Ingestion successful (HTTP %s).", resp.status_code)
