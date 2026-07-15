@@ -7,10 +7,10 @@
 -- PROXY) whose message is plain text, not JSON.
 --
 -- This stage only parses `message` when `msgid` is one of the JSON sources
--- (DUO, EMAIL, WINEVENT) and promotes the decoded keys to top-level fields
--- so TREADSTONE_DETECTIONS.md queries (EventID, TargetUserName, result, ...)
--- work without the raw-message fallback syntax. Every other event passes
--- through completely unchanged.
+-- (DUO, EMAIL, WINEVENT, CLOUDTRAIL) and promotes the decoded keys to
+-- top-level fields so TREADSTONE_DETECTIONS.md queries (EventID,
+-- TargetUserName, result, userIdentity.type, ...) work without the
+-- raw-message fallback syntax. Every other event passes through unchanged.
 --
 -- Entry point contract: one record in, one record out (same shape as the
 -- OCSF serializer stage in the dpm-lua-creation skill's ocsf_serializer.lua
@@ -20,7 +20,7 @@ local json = require('json')
 local log = require('log')
 
 -- msgid values whose message field is a JSON string, per TREADSTONE_PIPELINE.md.
-local JSON_MSGIDS = { DUO = true, EMAIL = true, WINEVENT = true }
+local JSON_MSGIDS = { DUO = true, EMAIL = true, WINEVENT = true, CLOUDTRAIL = true }
 
 -- Envelope/reserved keys DataPipeline already owns at the document root.
 -- A decoded key that collides with one of these is kept under jsonkeyed

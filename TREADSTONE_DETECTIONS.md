@@ -16,6 +16,7 @@ line in `message`.
 | `DUO` | `result`, `reason`, `factor`, `email`, `user.name`, `access_device.ip`, `access_device.location.country`, `auth_device.ip`, `application.name` |
 | `EMAIL` | `attackType`, `attackVector`, `recipientAddress`, `fromAddress`, `senderIpAddress`, `remediationStatus`, `subject` |
 | `WINEVENT` | `EventID`, `TicketEncryptionType`, `TargetUserName`, `ServiceName`, `IpAddress`, `LogonType`, `CommandLine`, `SubjectUserName`, `Computer` |
+| `CLOUDTRAIL` | `eventName`, `eventSource`, `sourceIPAddress`, `recipientAccountId`, `errorCode`, `userIdentity.type`, `userIdentity.arn`, `userIdentity.sessionContext.attributes.mfaAuthenticated`, `requestParameters.*` |
 | text (`ASA*`,`DNS`,`DBAUDIT`,`PROXY`,`SSHD`,`SUDO`,`PAM`,`HTTP`,`CRON`,`AUDIT`) | raw line in `message` |
 
 > **If a JSON-source query returns zero, it's one of two things:**
@@ -187,6 +188,44 @@ message contains 'Reykjavik Mainframe Breach' || message contains 'Deep Dream Ba
 
 ---
 
+## D. AWS (CloudTrail) detections
+
+The simulated AWS org is intentionally hardened by default (MFA-enforced
+AssumedRole sessions, no long-lived keys, encrypted S3, trusted-IP-only
+egress) — see `generate_logs.py`'s `AWS_*` constants. Every query below
+should return **zero** hits against ambient traffic; a hit means one of the
+two AWS attack scenarios actually fired.
+
+### D1 — Root account usage  ·  T1078.004
+```
+msgid = 'CLOUDTRAIL' userIdentity.type = 'Root'
+| group actions=count(), events=array_agg_distinct(eventName, 10) by recipientAccountId
+| sort -actions
+```
+
+### D2 — CloudTrail logging disabled or deleted  ·  T1562.008
+```
+msgid = 'CLOUDTRAIL' (eventName = 'StopLogging' || eventName = 'DeleteTrail' || eventName = 'UpdateTrail')
+| group actions=count(), events=array_agg_distinct(eventName, 10) by recipientAccountId, sourceIPAddress
+| sort -actions
+```
+
+### D3 — IAM privilege escalation via policy attachment  ·  T1098.003
+```
+msgid = 'CLOUDTRAIL' (eventName = 'AttachUserPolicy' || eventName = 'AttachRolePolicy' || eventName = 'PutRolePolicy' || eventName = 'PutUserPolicy')
+| group actions=count(), events=array_agg_distinct(eventName, 10) by userIdentity.arn
+| sort -actions
+```
+
+### D4 — Console login without MFA  ·  T1078
+```
+msgid = 'CLOUDTRAIL' eventName = 'ConsoleLogin' userIdentity.sessionContext.attributes.mfaAuthenticated = 'false'
+| group logins=count() by userIdentity.arn, sourceIPAddress
+| sort -logins
+```
+
+---
+
 ## Promoting to detection rules
 
 To turn a hunt into a STAR / Custom Detection / PowerQuery Alert:
@@ -229,6 +268,8 @@ Scenario → detection it lights up:
 | `berlin_neski` | **C3** (Neski files) |
 | `reykjavik_hack` / `vegas_dewey` / `deepdream_cyberops` | **C4** (Reykjavik/Deep Dream) |
 | (any with Duo logins across cities) | **B1** (impossible travel) — fire 2+ different-city scenarios |
+| `aws_privesc_kublinski` | **D3** (IAM privilege escalation via policy attachment) |
+| `aws_defense_evasion_petra` | **D1** (root usage), **D2** (logging disabled), **D4** (console login without MFA) |
 | `rome_extraction_blown` / `copenhagen_sigint` / `ny_treadstone_induction` / `larx_handoff` / `east_berlin_origin` / `mckenna_awakening` / `seoul_pak_awakening` | story color — no dedicated detection yet (same as `goa_kirill`/`athens_riots`) |
 
 Then run the detection over the last few minutes and confirm the hits.

@@ -352,6 +352,40 @@ WIN_FAIL_STATUS = [
     ("0xC0000072", "0x0",        "account disabled"),
 ]
 
+# ── AWS CloudTrail ──────────────────────────────────────────────────────────
+#
+# Modeled as a hardened AWS Organization, one account per program. Ambient
+# traffic reflects security best practice on purpose: STS AssumeRole only
+# (no long-lived access keys, no root usage), MFA-enforced console logins,
+# encrypted S3 (SSE-KMS), least-privilege roles, and calls only ever
+# originating from known corporate egress IPs. Root usage, MFA-less logins,
+# disabled logging, and privilege escalation are deliberately NEVER emitted
+# by the ambient generator below -- they only appear inside the dedicated
+# attack scenarios (sc_aws_privesc_kublinski, sc_aws_defense_evasion_petra),
+# so a detection firing on them means something actually happened.
+AWS_ACCOUNTS = {
+    "TREADSTONE": "778812340091",
+    "BLACKBRIAR": "778812340092",
+    "OUTCOME":    "778812340093",
+    "IRONHAND":   "778812340094",
+}
+AWS_REGIONS = ["us-east-1", "eu-central-1", "ap-northeast-2"]
+AWS_ROLES = {
+    "TREADSTONE": "treadstone-ops-readonly",
+    "BLACKBRIAR": "blackbriar-analyst",
+    "OUTCOME":    "outcome-larx-readonly",
+    "IRONHAND":   "ironhand-targeting-readonly",
+}
+AWS_S3_BUCKETS = {
+    "TREADSTONE": "treadstone-asset-roster-enc",
+    "BLACKBRIAR": "blackbriar-intel-archive-enc",
+    "OUTCOME":    "outcome-larx-targets-enc",
+    "IRONHAND":   "ironhand-targeting-data-enc",
+}
+# Corporate egress ranges -- benign CloudTrail calls always originate here.
+# Only compromise scenarios show a foreign/public source IP.
+AWS_TRUSTED_SOURCE_IPS = ["10.0.1.10", "10.0.2.20", "10.1.0.50", "10.2.5.100"]
+
 # CIA-plausible destination ports
 SENSITIVE_PORTS = {
     22:   "SSH",
@@ -962,6 +996,95 @@ def gen_win_event() -> str:
     return rfc5424(sev, 13, f"{comp.lower()}.cia.gov", "Security", "-", "WINEVENT",
                    json.dumps(base, separators=(",", ":")))
 
+def _cloudtrail_event(op: dict, program: str, event_name: str, event_source: str,
+                       request_params: dict | None = None, response_elements: dict | None = None,
+                       read_only: bool = True, mfa: bool = True, source_ip: str | None = None,
+                       error_code: str | None = None, error_message: str | None = None,
+                       root: bool = False) -> dict:
+    """Build a realistic CloudTrail record for a benign, MFA-enforced AssumeRole session."""
+    account = AWS_ACCOUNTS[program]
+    role = AWS_ROLES[program]
+    region = random.choice(AWS_REGIONS)
+    now = datetime.now(timezone.utc)
+    principal_id = "AROA" + "".join(random.choices("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", k=16))
+    event = {
+        "eventVersion": "1.08",
+        "userIdentity": {"type": "Root", "principalId": account, "accountId": account,
+                          "arn": f"arn:aws:iam::{account}:root"} if root else {
+            "type": "AssumedRole",
+            "principalId": f"{principal_id}:{op['name']}",
+            "arn": f"arn:aws:sts::{account}:assumed-role/{role}/{op['name']}",
+            "accountId": account,
+            "sessionContext": {
+                "sessionIssuer": {"type": "Role", "principalId": principal_id,
+                                  "arn": f"arn:aws:iam::{account}:role/{role}", "accountId": account},
+                "attributes": {"mfaAuthenticated": "true" if mfa else "false",
+                               "creationDate": now.strftime("%Y-%m-%dT%H:%M:%SZ")},
+            },
+        },
+        "eventTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "eventSource": event_source,
+        "eventName": event_name,
+        "awsRegion": region,
+        "sourceIPAddress": source_ip or random.choice(AWS_TRUSTED_SOURCE_IPS),
+        "userAgent": random.choice(["aws-cli/2.15.0", "console.amazonaws.com",
+                                     "Boto3/1.34.0 Python/3.12"]),
+        "requestParameters": request_params or {},
+        "responseElements": response_elements,
+        "requestID": "-".join("".join(random.choices("0123456789abcdef", k=n)) for n in (8, 4, 4, 4, 12)),
+        "eventID": "-".join("".join(random.choices("0123456789abcdef", k=n)) for n in (8, 4, 4, 4, 12)),
+        "readOnly": read_only,
+        "eventType": "AwsApiCall",
+        "managementEvent": True,
+        "recipientAccountId": account,
+    }
+    if error_code:
+        event["errorCode"] = error_code
+        event["errorMessage"] = error_message
+    return event
+
+def _cloudtrail_line(event: dict, sev: int = 6) -> str:
+    return rfc5424(sev, 13, "cloudtrail-delivery.cia.gov", "cloudtrail", "-", "CLOUDTRAIL",
+                   json.dumps(event, separators=(",", ":")))
+
+def gen_cloudtrail_event() -> str:
+    """Ambient AWS CloudTrail traffic -- entirely within security guardrails.
+
+    Every event here is MFA-authenticated AssumedRole traffic from a trusted
+    corporate egress IP. The occasional AccessDenied is the org's
+    least-privilege boundary working as intended, not a gap.
+    """
+    program = random.choice(list(AWS_ACCOUNTS))
+    op = random.choice(OPERATIVES)
+    bucket = AWS_S3_BUCKETS[program]
+    account = AWS_ACCOUNTS[program]
+
+    choice = random.choices(
+        ["console_login", "get_object", "put_object", "describe_instances", "access_denied"],
+        weights=[3, 4, 2, 3, 2],
+    )[0]
+
+    if choice == "console_login":
+        event = _cloudtrail_event(op, program, "ConsoleLogin", "signin.amazonaws.com",
+                                   response_elements={"ConsoleLogin": "Success"})
+    elif choice == "get_object":
+        event = _cloudtrail_event(op, program, "GetObject", "s3.amazonaws.com",
+                                   request_params={"bucketName": bucket, "key": f"reports/{op['name']}.json.enc"})
+    elif choice == "put_object":
+        event = _cloudtrail_event(op, program, "PutObject", "s3.amazonaws.com", read_only=False,
+                                   request_params={"bucketName": bucket, "key": f"uploads/{op['name']}-{random.randint(1000,9999)}.enc",
+                                                    "x-amz-server-side-encryption": "aws:kms"})
+    elif choice == "describe_instances":
+        event = _cloudtrail_event(op, program, "DescribeInstances", "ec2.amazonaws.com",
+                                   request_params={"filterSet": {}})
+    else:  # access_denied -- a correctly scoped-out role hitting a boundary. Not another program's data.
+        other_program = random.choice([p for p in AWS_ACCOUNTS if p != program])
+        event = _cloudtrail_event(op, program, "GetObject", "s3.amazonaws.com",
+                                   request_params={"bucketName": AWS_S3_BUCKETS[other_program], "key": "restricted"},
+                                   error_code="AccessDenied",
+                                   error_message=f"User: arn:aws:sts::{account}:assumed-role/{AWS_ROLES[program]}/{op['name']} is not authorized to perform this action")
+    return _cloudtrail_line(event, sev=4 if choice == "access_denied" else 6)
+
 def _fake_sha256() -> str:
     chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     return "".join(random.choices(chars, k=43))
@@ -1446,6 +1569,43 @@ def sc_petra_handler_betrayal():
         _ssh_line("outpost-tulsa-ok.cia.gov", "Failed password for invalid user petra from "+ip+" port 52341 ssh2", sev=4),
     ])
 
+def sc_aws_privesc_kublinski():
+    """AWS PRIVILEGE ESCALATION — Kublinski's insider access attaches AdministratorAccess to himself."""
+    program = "BLACKBRIAR"
+    op = next(o for o in OPERATIVES if o["name"] == "jack.kublinski")
+    login = _cloudtrail_event(op, program, "ConsoleLogin", "signin.amazonaws.com",
+                               response_elements={"ConsoleLogin": "Success"})
+    attach = _cloudtrail_event(op, program, "AttachUserPolicy", "iam.amazonaws.com", read_only=False,
+                                request_params={"userName": "jack.kublinski",
+                                                 "policyArn": "arn:aws:iam::aws:policy/AdministratorAccess"})
+    put_role = _cloudtrail_event(op, program, "PutRolePolicy", "iam.amazonaws.com", read_only=False,
+                                  request_params={"roleName": AWS_ROLES[program], "policyName": "self-escalate",
+                                                   "policyDocument": "{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}"})
+    return ("AWS privilege escalation — Kublinski attaches AdministratorAccess to himself", [
+        _cloudtrail_line(login),
+        _duo_line("duo-authproxy02.cia.gov", "j.kublinski", "BLACKBRIAR", "Insider Threat Review Portal", "192.168.10.15", "success", "user_approved"),
+        _cloudtrail_line(attach, sev=2),
+        _cloudtrail_line(put_role, sev=2),
+    ])
+
+def sc_aws_defense_evasion_petra():
+    """AWS DEFENSE EVASION — Petra disables org CloudTrail logging from a compromised session."""
+    program = "BLACKBRIAR"
+    op = next(o for o in OPERATIVES if o["name"] == "petra")
+    ip = "160.153.0.12"  # Beirut -- her known egress, already tied to her in sc_petra_handler_betrayal
+    login = _cloudtrail_event(op, program, "ConsoleLogin", "signin.amazonaws.com", mfa=False, source_ip=ip,
+                               response_elements={"ConsoleLogin": "Success"})
+    stop_logging = _cloudtrail_event(op, program, "StopLogging", "cloudtrail.amazonaws.com", read_only=False,
+                                      mfa=False, source_ip=ip, request_params={"name": "org-cloudtrail"})
+    root_action = _cloudtrail_event(op, program, "DeleteTrail", "cloudtrail.amazonaws.com", read_only=False,
+                                     mfa=False, source_ip=ip, root=True, request_params={"name": "org-cloudtrail"})
+    return ("AWS defense evasion — Petra disables org CloudTrail logging", [
+        _cloudtrail_line(login, sev=4),
+        _cloudtrail_line(stop_logging, sev=1),
+        _cloudtrail_line(root_action, sev=1),
+        _sudo_line("blackbriar-db01.cia.gov", "petra", "/usr/bin/openssl s_client -connect langley.cia.gov:443"),
+    ])
+
 SCENARIOS: list[Callable[[], tuple]] = [
     sc_zurich_bank, sc_paris_safehouse, sc_berlin_neski, sc_goa_kirill,
     sc_waterloo_ross, sc_madrid_daniels, sc_tangier_desh, sc_manila_outcome,
@@ -1457,6 +1617,7 @@ SCENARIOS: list[Callable[[], tuple]] = [
     sc_deepdream_cyberops, sc_larx_handoff,
     sc_east_berlin_origin, sc_mckenna_awakening, sc_seoul_pak_awakening,
     sc_petra_handler_betrayal,
+    sc_aws_privesc_kublinski, sc_aws_defense_evasion_petra,
 ]
 
 # ─── Generator registry ────────────────────────────────────────────────────────
@@ -1480,6 +1641,7 @@ GENERATORS: list[tuple[int, Callable[[], str]]] = [
     (4,  gen_email_threat),
     (6,  gen_db_audit),
     (10, gen_win_event),
+    (12, gen_cloudtrail_event),
 ]
 
 POPULATION = [fn for weight, fn in GENERATORS for _ in range(weight)]

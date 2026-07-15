@@ -33,7 +33,7 @@ for the JSON sources (Duo / Abnormal email / Windows).
 
 | `msgid` | source | `message` is |
 |---|---|---|
-| `DUO`, `EMAIL`, `WINEVENT` | Cisco Duo, Abnormal email, Windows Security | **JSON** |
+| `DUO`, `EMAIL`, `WINEVENT`, `CLOUDTRAIL` | Cisco Duo, Abnormal email, Windows Security, AWS CloudTrail | **JSON** |
 | `ASA302013`/`…`/`ASA400`, `SSHD`, `SUDO`, `PAM`, `HTTP`, `CRON`, `AUDIT`, `DNS`, `DBAUDIT`, `PROXY` | everything else | **plain text** |
 
 ## Pipeline requirements (DataPipeline side)
@@ -48,7 +48,7 @@ A parse-json applied to the whole feed throws
 (their `message` starts with `%ASA-…`, `client @…`, etc., not `{`). Run it **only** on JSON:
 
 ```
-parse_json(message)  WHEN  msgid in ('DUO','EMAIL','WINEVENT')
+parse_json(message)  WHEN  msgid in ('DUO','EMAIL','WINEVENT','CLOUDTRAIL')
 # or, source-agnostic (auto-handles future JSON sources):
 parse_json(message)  WHEN  message starts_with '{'
 ```
