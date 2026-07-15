@@ -2,6 +2,8 @@
 
 **FoundStone** is a detection rule verification tool for SentinelOne. It takes real log events, overlays only the fields each detection rule requires, replays the synthetic events into the Singularity Data Lake (SDL), and verifies that alerts fire — giving you a ground-truth pass/fail result for every rule in your deployed library.
 
+This repo also ships the **Treadstone Log Simulator** — a standalone synthetic security-event generator (Jason Bourne universe themed) that continuously feeds realistic on-prem *and* AWS telemetry through SentinelOne DataPipeline into SDL, for building and testing detections against a living dataset instead of one-off overlays. See [Treadstone Log Simulator](#treadstone-log-simulator) below.
+
 ---
 
 ## How it works
@@ -25,6 +27,7 @@ This approach was validated against the full Okta detection library — 41/42 ru
 - Docker + Docker Compose (OrbStack works great on macOS)
 - A `data/extracted.json` file — the parsed detection library (see [Data setup](#data-setup))
 - A SentinelOne tenant for testing (POC/demo only — never production)
+- `SDL_BASE_URL` must point at your tenant's actual **SDL/XDR host** (e.g. `https://xdr.us1.sentinelone.net`), **not** the Management Console URL — the two are different hosts, and pointing at the console will silently break ingestion (404s on `/api/query` / `/api/addEvents`)
 
 ---
 
@@ -37,8 +40,13 @@ cd foundstone
 # Add your extracted.json to data/
 cp /path/to/extracted.json data/
 
-# Start the container
-docker compose up -d
+# Fill in .env — see .env.example (SDL_BASE_URL/tokens, and optionally
+# HEC_URL/HEC_TOKEN if you also want the Treadstone Log Simulator running)
+cp .env.example .env
+
+# Start the FoundStone container (add the Treadstone services too if you want them —
+# see "Treadstone Log Simulator" below)
+docker compose up -d foundstone
 ```
 
 Open **http://localhost:8080**
@@ -89,6 +97,8 @@ All configuration is done through the **Environments** tab in the UI. No editing
    - **S1 API Token** — account-level API token (for library sync)
 3. Set as active and save
 
+> **Note:** the actual `/api/run` verification pipeline reads its SDL connection from `.env` (`SDL_BASE_URL`/`SDL_READ_TOKEN`/`SDL_WRITE_TOKEN`/`SDL_ACCOUNT_ID`/`DRY_RUN`), not from the DB-stored environment above — that UI environment is used for template fetching and status display. Keep both in sync. `SDL_BASE_URL` is the **SDL/XDR host**, not the console host — see [Requirements](#requirements).
+
 ### Sync the detection library
 
 Click **↓ Sync from Active Environment** — this pulls all deployed rules from `/web/api/v2.1/detection-library/platform-rules` and filters the Rules tab to show only what's active on your tenant.
@@ -120,14 +130,57 @@ Supported formats:
 
 ---
 
-## Port
+## Treadstone Log Simulator
 
-The container runs on **port 8080** by default. Change in `docker-compose.yml`:
+A separate, always-on synthetic security-event generator — Jason Bourne universe themed — that ships a steady stream of realistic telemetry through SentinelOne DataPipeline into SDL. Use it to build and validate PowerQuery detections against a living dataset (with scripted, correlated attack scenarios you can fire on demand) rather than one-off overlaid events.
 
-```yaml
-ports:
-  - "8080:8000"
 ```
+log-generator ──RFC 5424/6587 over TCP──▶ syslog-ng ──HEC (one POST/event)──▶ DataPipeline ──▶ SDL
+```
+
+### What it generates
+
+**On-prem sources:** Cisco ASA firewall, Linux sshd/sudo/PAM/cron, Apache access logs, Cisco Duo MFA, Squid web proxy, ISC BIND DNS, Abnormal Security email threats, PostgreSQL pgAudit, Windows Security Events.
+
+**AWS (CloudTrail):** modeled as a **hardened** AWS Organization on purpose — MFA-enforced `AssumeRole` sessions only (no root usage, no long-lived access keys in normal traffic), encrypted S3 (SSE-KMS), least-privilege roles per program, and API calls only ever from known corporate egress IPs. Root usage, disabled logging, privilege escalation, and MFA-less logins are deliberately **never** ambient — they only appear inside the two dedicated attack scenarios, so a detection firing on them means something actually happened.
+
+31 scripted, correlated attack scenarios spanning all 5 Bourne films, the 2019 *Treadstone* TV series, and two AWS-specific scenarios — each emits a short burst of events across multiple sources sharing actors/hosts/IPs, so you can pivot host→user→IP across firewall, identity, proxy, DB, and cloud logs. Full list and detection mappings: [TREADSTONE_DETECTIONS.md](TREADSTONE_DETECTIONS.md).
+
+### Starting it
+
+```bash
+# In .env, add (found in DataPipeline UI: Pipelines > Sources > + Add Source > HTTP Event Collector):
+HEC_URL=https://ingest.<region>.sentinelone.net/services/collector/event
+HEC_TOKEN=<your DataPipeline HEC token>
+HEC_INDEX=treadstone
+
+docker compose up -d --build syslog-ng log-generator
+```
+
+You'll also need a **Lua processor stage** in the DataPipeline pipeline itself — the built-in `parse_json` step has no per-source gating and throws on the plain-text sources. Use [datapipeline/parse_json_by_msgid.lua](datapipeline/parse_json_by_msgid.lua) (verified locally with `datapipeline/test_parse_json_by_msgid.lua`); see [TREADSTONE_PIPELINE.md](TREADSTONE_PIPELINE.md) for the full integration notes (field collisions, sourcetype routing, reliability behavior).
+
+### Firing scenarios on demand
+
+Ambient scenario firing is rare (`SCENARIO_CHANCE=0.02`). To test/demo a detection immediately:
+
+```bash
+docker exec treadstone-log-generator python3 fire_scenario.py                 # list all scenarios
+docker exec treadstone-log-generator python3 fire_scenario.py kerberoast      # fire one (partial name OK)
+docker exec treadstone-log-generator python3 fire_scenario.py all            # fire every scenario once
+```
+
+See [TREADSTONE_DETECTIONS.md](TREADSTONE_DETECTIONS.md) for the full PowerQuery detection library and the scenario → detection mapping table.
+
+---
+
+## Ports
+
+| Service | Port | Purpose |
+|---|---|---|
+| `foundstone` | 8080 → 8000 | Web UI / API |
+| `syslog-ng` | 514/udp, 601/tcp | Treadstone Log Simulator ingest |
+
+Change in `docker-compose.yml`.
 
 ---
 
@@ -151,16 +204,31 @@ foundstone/
   api.py                  # FastAPI backend
   foundstone/
     classifier.py         # Rule class detection (simple/volume/correlation/first_seen/scheduled)
-    rule_parser.py        # pair_list → minimal field overlay
-    event_builder.py      # Deep-merge overlay onto real template
-    ingester.py           # SDL addEvents
-    verifier.py           # Query alert dataset, match rule names
-    runner.py             # Full pipeline orchestrator
-    template_fetcher.py   # SDL V1 query for real event templates
-    db.py                 # SQLite — environments + deployed rule names
+    rule_parser.py         # pair_list → minimal field overlay
+    event_builder.py       # Deep-merge overlay onto real template
+    ingester.py            # SDL addEvents
+    verifier.py            # Query alert dataset, match rule names (PowerQuery via /api/powerQuery)
+    runner.py              # Full pipeline orchestrator
+    template_fetcher.py    # SDL V1 query for real event templates
+    db.py                  # SQLite — environments + deployed rule names
   ui/                     # React + Vite + Tailwind frontend
   Dockerfile              # Multi-stage: Node builds UI, Python serves it
   docker-compose.yml
+
+log-generator/            # Treadstone Log Simulator — synthetic event generator
+  generate_logs.py         # Ambient generators + 31 scripted scenarios
+  fire_scenario.py         # CLI to fire scenarios on demand
+  preview.py
+
+syslog-ng/                 # Receives generator output, forwards to DataPipeline via HEC
+  syslog-ng.conf
+
+datapipeline/               # DataPipeline pipeline processor stage
+  parse_json_by_msgid.lua   # Per-source JSON parsing/field-promotion Lua stage
+  test_parse_json_by_msgid.lua  # Local verification harness
+
+TREADSTONE_DETECTIONS.md   # PowerQuery detection library + scenario mapping
+TREADSTONE_PIPELINE.md     # DataPipeline integration notes (hard-won)
 ```
 
 ---
