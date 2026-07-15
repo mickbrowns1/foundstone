@@ -140,7 +140,7 @@ log-generator ──RFC 5424/6587 over TCP──▶ syslog-ng ──HEC (one POS
 
 ### What it generates
 
-**On-prem sources:** Cisco ASA firewall, Linux sshd/sudo/PAM/cron, Apache access logs, Cisco Duo MFA, Squid web proxy, ISC BIND DNS, Abnormal Security email threats, PostgreSQL pgAudit, Windows Security Events.
+**On-prem / SaaS security sources:** Cisco Firewall Threat Defense, Linux Audit (sshd/sudo/PAM/cron/kernel), Apache HTTP Server access logs, Cisco Duo MFA, Zscaler Internet Access, ISC BIND DNS, Mimecast email security, PostgreSQL, Windows Event Logs. Every source is tagged with a real `dataSource.name`/`dataSource.category` grounded in this tenant's own deployed rule library where a match exists (see `TREADSTONE_PIPELINE.md`'s tagging table).
 
 **AWS (CloudTrail):** modeled as a **hardened** AWS Organization on purpose — MFA-enforced `AssumeRole` sessions only (no root usage, no long-lived access keys in normal traffic), encrypted S3 (SSE-KMS), least-privilege roles per program, and API calls only ever from known corporate egress IPs. Root usage, disabled logging, privilege escalation, and MFA-less logins are deliberately **never** ambient — they only appear inside the dedicated attack scenarios, so a detection firing on them means something actually happened.
 

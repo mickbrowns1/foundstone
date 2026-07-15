@@ -317,17 +317,17 @@ DNS_SUSPICIOUS = [
     ("beacon.treadstone.example.net", "TXT"),
 ]
 
-# ── Abnormal Security (email threat log) ──
-# (attackType, attackVector, attackStrategy)
-ABNORMAL_ATTACKS = [
-    ("Phishing: Credential",         "Link",       "Name Impersonation"),
-    ("Business Email Compromise",    "Text",       "Internal - Executive"),
-    ("Malware",                      "Attachment", "Unknown Sender"),
-    ("Invoice/Payment Fraud",        "Link",       "Vendor Impersonation"),
-    ("Extortion",                    "Text",       "External"),
-    ("Social Engineering (BEC)",     "Text",       "Name Impersonation"),
-    ("Reconnaissance",               "Text",       "External"),
+# ── Mimecast (email security gateway) ──
+# Real category values + action set grounded in this tenant's own deployed
+# Mimecast-sourced rules (data/extracted.json): unmapped.category
+# (phish/Malware/Anonymizers/Compromised/Botnets/Peer-to-Peer/Dangerous file
+# extension), unmapped.action/actions/adminOverride (hold/block/bounce),
+# actor.invoked_by (Entry Scan/User Click), status_detail (malicious),
+# event.type (TTP Attachment/Impersonation Protection).
+MIMECAST_MALICIOUS_CATEGORIES = [
+    "phish", "Malware", "Anonymizers", "Compromised", "Peer-to-Peer",
 ]
+MIMECAST_BLOCK_ACTIONS = ["hold", "block", "bounce"]
 PHISH_SENDERS = [
     ("IT Helpdesk",        "helpdesk@treadstone-ops.example.com"),
     ("Langley Security",   "security-alert@cia-portal.example.net"),
@@ -338,6 +338,16 @@ PHISH_SENDERS = [
 PHISH_ATTACHMENTS = [
     "neski-files.xls.exe", "blackbriar-brief.pdf.scr",
     "asset-roster.docm", "invoice_84412.html", "secure-message.htm",
+]
+MIMECAST_BENIGN_SENDERS = [
+    ("Langley IT",  "it-notifications@cia.gov"),
+    ("DocuSign",    "no-reply@docusign.com"),
+    ("Zoom",        "no-reply@zoom.us"),
+    ("GitHub",      "notifications@github.com"),
+]
+MIMECAST_BENIGN_SUBJECTS = [
+    "Your weekly digest", "Meeting invite: Ops sync", "Signature requested",
+    "Security patch notification", "PR review requested",
 ]
 
 # ── PostgreSQL pgAudit (classified intel DB) ──
@@ -851,54 +861,51 @@ def gen_duo_auth() -> str:
     return rfc5424(sev, 13, proxy, "duo", "-", "DUO", json.dumps(event, separators=(",", ":")))
 
 def gen_web_proxy() -> str:
-    """Squid web proxy access log — native format, outbound/egress traffic.
+    """Ambient Zscaler Internet Access traffic (JSON). Suspicious
+    destinations are properly blocked/IPS-reset almost every time -- an
+    "Allowed" hit against a known-bad domain only shows up in dedicated
+    exfil/C2 scenarios, not here."""
+    proxy  = random.choice(WEB_PROXIES)
+    client = random.choice(INTERNAL_IPS)
+    op     = random.choice(OPERATIVES)
 
-    Native log format (https://wiki.squid-cache.org/Features/LogFormat):
-      time elapsed remotehost code/status bytes method URL rfc931 \\
-        peerstatus/peerhost type
-    """
-    proxy   = random.choice(WEB_PROXIES)
-    client  = random.choice(INTERNAL_IPS)
-    op      = random.choice(OPERATIVES)
-    now     = datetime.now(timezone.utc)
-    elapsed = random.randint(1, 4000)
+    suspicious = random.random() < 0.15
+    url, _peer_ip, _ctype = random.choice(EGRESS_SUSPICIOUS if suspicious else EGRESS_BENIGN)
+    hostname = url.split("://")[-1].split("/")[0]
+    method = ("CONNECT" if url.startswith("https://") and random.random() < 0.7
+              else random.choice(["GET", "GET", "GET", "POST"]))
 
-    suspicious = random.random() < 0.35
-    url, peer_ip, ctype = random.choice(EGRESS_SUSPICIOUS if suspicious else EGRESS_BENIGN)
-
-    # HTTPS usually arrives as a CONNECT tunnel
-    if url.startswith("https://") and random.random() < 0.7:
-        method = "CONNECT"
-        target = url.split("/")[2] + ":443"
-        ctype  = "-"
+    if suspicious:
+        action = random.choice(["Blocked", "IPS Reset", "Drop"])  # caught almost every time
+        event: dict = {
+            "app_name": "Suspicious Web Activity",
+            "action": action,
+            "user": {"name": op["name"]},
+            "client_ip": client,
+            "http_request": {"method": method, "url": {"hostname": hostname, "categories": ["Suspicious Destinations"]}},
+            "risk_details": "malicious",
+            "bytes": random.randint(200, 800),
+            "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "malware": {"name": random.choice(["cobaltstrike", "unknown.rat", "generic.trojan"])},
+            "unmapped": {"event": {"threatcat": random.choice(["botnets", "c2", "malware"])}},
+        }
+        sev = 4
     else:
-        method = random.choice(["GET", "GET", "GET", "POST"])
-        target = url
-
-    # Egress filtering may block suspicious destinations
-    if suspicious and random.random() < 0.4:
-        code, status, sev = "TCP_DENIED", 403, 4
-        peer  = "HIER_NONE/-"
-        bytes_ = random.randint(200, 800)
-    else:
-        if method == "CONNECT":
-            code, status = "TCP_TUNNEL", 200
-        else:
-            code, status = random.choice(
-                [("TCP_MISS", 200), ("TCP_HIT", 200), ("TCP_REFRESH_HIT", 200), ("TCP_MISS", 302)]
-            )
-        sev   = 6
-        peer  = f"HIER_DIRECT/{peer_ip}"
-        # POST/CONNECT to exfil destinations can be large — the exfil signal
-        bytes_ = (random.randint(256, 6_000_000)
-                  if method in ("POST", "CONNECT")
+        bytes_ = (random.randint(256, 6_000_000) if method in ("POST", "CONNECT")
                   else random.randint(256, 200_000))
-
-    line = (
-        f"{now.timestamp():.3f} {elapsed} {client} {code}/{status} {bytes_} "
-        f"{method} {target} {op['name']} {peer} {ctype}"
-    )
-    return rfc5424(sev, 16, proxy, "squid", str(random.randint(1000, 9999)), "PROXY", line)
+        event = {
+            "app_name": "Web Browsing",
+            "action": "Allowed",
+            "user": {"name": op["name"]},
+            "client_ip": client,
+            "http_request": {"method": method, "url": {"hostname": hostname, "categories": ["General Browsing"]}},
+            "risk_details": "benign",
+            "bytes": bytes_,
+            "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        sev = 6
+    return rfc5424(sev, 16, proxy, "zscaler", str(random.randint(1000, 9999)), "PROXY",
+                   json.dumps(event, separators=(",", ":")))
 
 def _b32(n: int) -> str:
     return "".join(random.choices("abcdefghijklmnopqrstuvwxyz234567", k=n))
@@ -925,45 +932,92 @@ def gen_dns_query() -> str:
            f"query: {domain} IN {qtype} +E(0) ({resolver})")
     return rfc5424(sev, 3, host, "named", str(random.randint(100,9999)), "DNS", msg)
 
-def gen_email_threat() -> str:
-    """Abnormal Security email threat log (Threat API message shape, JSON)."""
-    op   = random.choice(OPERATIVES)
-    name, sender = random.choice(PHISH_SENDERS)
-    attack, vector, strategy = random.choice(ABNORMAL_ATTACKS)
-    now  = datetime.now(timezone.utc)
-    iso  = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    recipient = f"{op['name']}@cia.gov"
-    remediation = random.choices(
-        ["Auto-Remediated", "Not Remediated", "Manually Remediated"], weights=[7, 2, 1])[0]
-    event = {
-        "threatId":          "-".join(_b32(n) for n in (8, 4, 4, 12)),
-        "abxMessageId":      random.randint(10**11, 10**12),
-        "fromName":          name,
-        "fromAddress":       sender,
-        "senderIpAddress":   random.choice(EXTERNAL_IPS),
-        "recipientAddress":  recipient,
-        "toAddresses":       recipient,
-        "subject":           random.choice([
-                                 "Blackbriar — your source is exposed",
-                                 "ACTION REQUIRED: verify your Langley credentials",
-                                 "Treadstone roster — review attached",
-                                 "Wire confirmation — Pecos Oil",
-                                 "Your mailbox will be deactivated",
-                             ]),
-        "attackType":        attack,
-        "attackVector":      vector,
-        "attackStrategy":    strategy,
-        "impersonatedParty": strategy if "Impersonation" in strategy else "None / Others",
-        "attachmentNames":   ([random.choice(PHISH_ATTACHMENTS)] if vector == "Attachment" else []),
-        "urls":              (["http://" + random.choice(DNS_SUSPICIOUS)[0] + "/login"] if vector == "Link" else []),
-        "receivedTime":      iso,
-        "sentTime":          iso,
-        "remediationStatus": remediation,
+def _mimecast_event(*, recipient: str, sender_name: str, sender: str, subject: str,
+                     direction: str = "inbound", actor_invoked_by: str = "Entry Scan",
+                     event_type: str | None = None, malicious: bool = False,
+                     category: str | None = None, blocked: bool = False,
+                     file_type: str | None = None, file_name: str | None = None,
+                     url: str | None = None, rejected: bool = False) -> dict:
+    """Build a Mimecast-shaped email-security event. Field names grounded in
+    this tenant's own deployed Mimecast-sourced rules (see the comment above
+    MIMECAST_MALICIOUS_CATEGORIES). `blocked` always sets a concrete
+    unmapped.action value (hold/block/bounce vs none) rather than omitting
+    the field, so detections can cleanly test for "malicious and NOT blocked"."""
+    now = datetime.now(timezone.utc)
+    event: dict = {
+        "direction": direction,
+        "actor": {"invoked_by": actor_invoked_by},
+        "status_detail": "malicious" if malicious else "clean",
+        "email": {"from": sender, "fromName": sender_name, "to": recipient, "subject": subject},
+        "receivedTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "unmapped": {"route": direction, "action": [], "actions": [], "adminOverride": []},
     }
-    # MALICIOUS not auto-remediated → warning; remediated → notice
-    sev = 4 if remediation != "Auto-Remediated" else 5
-    return rfc5424(sev, 13, "abnormal-relay01.cia.gov", "abnormal", "-", "EMAIL",
+    actions = list(MIMECAST_BLOCK_ACTIONS) if blocked else ["none"]
+    event["unmapped"]["action"] = actions
+    event["unmapped"]["actions"] = actions
+    event["unmapped"]["adminOverride"] = actions
+    if event_type:
+        # Flat dotted key, NOT a nested {"event": {...}} object -- "event" is
+        # DataPipeline's own envelope-reserved key (the original HEC body
+        # field, pre-rename to "message"), so a nested top-level "event"
+        # object gets silently dropped on the way through. A literal
+        # "event.type" string key sidesteps that collision entirely while
+        # still landing as the real rule-matching attribute name.
+        event["event.type"] = event_type
+        if event_type == "TTP Impersonation Protection":
+            event["unmapped"]["taggedMalicious"] = malicious
+    if category:
+        event["unmapped"]["category"] = category
+    if file_type or file_name:
+        event["file"] = {}
+        if file_type: event["file"]["type"] = file_type
+        if file_name:
+            event["file"]["name"] = file_name
+            event["unmapped"]["AttNames"] = [file_name]
+        event["unmapped"]["actionTriggered"] = actions
+    if url:
+        event["url"] = {"address": url}
+    if rejected:
+        event["unmapped"]["Act"] = "Rej"
+        event["api"] = {"response": {"message": "Invalid Recipient Address"}}
+    return event
+
+def _email_line(event: dict) -> str:
+    sev = 4 if event.get("status_detail") == "malicious" else 6
+    return rfc5424(sev, 13, "mimecast-relay01.cia.gov", "mimecast", "-", "EMAIL",
                    json.dumps(event, separators=(",", ":")))
+
+def gen_email_threat() -> str:
+    """Mimecast email-security gateway log (JSON). Mostly clean inbound
+    business mail; phishing/malware that DOES appear is properly held or
+    blocked -- genuinely undetected malicious mail only shows up in the
+    dedicated scenarios (sc_phish_landy, sc_langley_insider_leak)."""
+    op = random.choice(OPERATIVES)
+    recipient = f"{op['name']}@cia.gov"
+    roll = random.random()
+
+    if roll < 0.75:
+        name, sender = random.choice(MIMECAST_BENIGN_SENDERS)
+        event = _mimecast_event(recipient=recipient, sender_name=name, sender=sender,
+                                 subject=random.choice(MIMECAST_BENIGN_SUBJECTS))
+    elif roll < 0.90:
+        name, sender = random.choice(PHISH_SENDERS)
+        subject = random.choice(["ACTION REQUIRED: verify your account", "Invoice overdue", "Password expires today"])
+        event = _mimecast_event(recipient=recipient, sender_name=name, sender=sender, subject=subject,
+                                 malicious=True, category=random.choice(MIMECAST_MALICIOUS_CATEGORIES), blocked=True)
+    elif roll < 0.97:
+        name, sender = random.choice(PHISH_SENDERS)
+        attachment = random.choice(PHISH_ATTACHMENTS)
+        event = _mimecast_event(recipient=recipient, sender_name=name, sender=sender,
+                                 subject="Please review the attached document",
+                                 event_type="TTP Attachment Protection", malicious=True, blocked=True,
+                                 file_type=attachment.rsplit(".", 1)[-1], file_name=attachment)
+    else:
+        event = _mimecast_event(recipient=recipient, sender_name="External", sender="unknown@example.net",
+                                 subject="(clicked link)", actor_invoked_by="User Click", malicious=True,
+                                 category=random.choice(["Anonymizers", "Compromised", "Peer-to-Peer"]),
+                                 blocked=True, url="http://" + random.choice(DNS_SUSPICIOUS)[0])
+    return _email_line(event)
 
 def gen_db_audit() -> str:
     """PostgreSQL pgAudit record from the classified intel DB."""
@@ -1155,7 +1209,7 @@ def _edr_event(event_type: str, endpoint: str, *, category: str = "Process", sit
     os_name = EDR_ENDPOINTS.get(endpoint, "windows")
     now = datetime.now(timezone.utc)
     event: dict = {
-        "dataSource": {"name": "SentinelOne", "vendor": "SentinelOne", "category": "endpoint"},
+        "dataSource": {"name": "SentinelOne", "vendor": "SentinelOne", "category": "security"},
         "event": {"type": event_type, "category": category,
                   "time": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"},
         "endpoint": {"os": os_name, "name": endpoint,
@@ -1300,12 +1354,46 @@ def _http_line(host: str, src: str, user: str, method: str, path: str,
     clf = f'{src} - {user} [{ts}] "{method} {path} HTTP/1.1" {status} {size} "-" "{ua}"'
     return rfc5424(6, 16, host, "apache2", str(random.randint(1000, 9999)), "HTTP", clf)
 
+_PROXY_THREAT_KEYWORDS = ("exfil", "deaddrop", "beacon", "sigint-cache",
+                          "mainframe-gw", "neski", "pecos-oil", "deepdream",
+                          "securedrop", "pastebin", "filebin")
+
 def _proxy_line(host: str, client: str, code: str, status: int, bytes_: int,
                 method: str, target: str, user: str, peer: str, ctype: str,
                 sev: int = 6) -> str:
-    line = (f"{datetime.now(timezone.utc).timestamp():.3f} {random.randint(1,4000)} "
-            f"{client} {code}/{status} {bytes_} {method} {target} {user} {peer} {ctype}")
-    return rfc5424(sev, 16, host, "squid", str(random.randint(1000, 9999)), "PROXY", line)
+    """Zscaler Internet Access-shaped event (msgid PROXY). Field names
+    grounded in this tenant's own deployed Zscaler-sourced rules (app_name,
+    action, malware.name, http_request.url.hostname/categories,
+    unmapped.event.threatcat, risk_details). Keeps the original Squid-style
+    call signature so existing scenario call sites don't need to change --
+    only the wire format is now Zscaler-shaped JSON instead of Squid text."""
+    hostname = target.split("://")[-1].split("/")[0].split(":")[0]
+    is_threat = any(k in target.lower() for k in _PROXY_THREAT_KEYWORDS)
+    blocked = code == "TCP_DENIED"
+    # Action reflects only whether THIS call was denied -- not whether the
+    # destination is a threat. Scenarios that model a successful exfil pass a
+    # non-denied code (e.g. TCP_TUNNEL) to a threat-keyword domain on purpose;
+    # forcing that to "IPS Reset" would silently turn the exfil into a block.
+    action = "Blocked" if blocked else "Allowed"
+    event: dict = {
+        "app_name": "Suspicious Web Activity" if is_threat else "Web Browsing",
+        "action": action,
+        "user": {"name": user},
+        "client_ip": client,
+        "http_request": {
+            "method": method,
+            "url": {"hostname": hostname,
+                     "categories": ["Suspicious Destinations"] if is_threat else ["General Browsing"]},
+        },
+        "risk_details": "malicious" if is_threat else "benign",
+        "bytes": bytes_,
+        "time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if is_threat:
+        event["malware"] = {"name": "unknown.threat"}
+        event["unmapped"] = {"event": {"threatcat": "c2"}}
+    return rfc5424(sev, 16, host, "zscaler", str(random.randint(1000, 9999)), "PROXY",
+                   json.dumps(event, separators=(",", ":")))
 
 def _audit_line(host: str, src: str, dst: str, dpt: int) -> str:
     mac = ":".join(f"{random.randint(0,255):02x}" for _ in range(6))
@@ -1353,26 +1441,6 @@ def _dns_line(host: str, client: str, domain: str, qtype: str = "A", sev: int = 
     msg = (f"client @{cid} {client}#{random.randint(1024,65535)} ({domain}): "
            f"query: {domain} IN {qtype} +E(0) ({random.choice(DNS_RESOLVERS)})")
     return rfc5424(sev, 3, host, "named", str(random.randint(100,9999)), "DNS", msg)
-
-def _email_line(recipient: str, sender_name: str, sender: str, subject: str,
-                attack: str, vector: str, strategy: str, remediation: str,
-                attachment: str = None, url: str = None) -> str:
-    now = datetime.now(timezone.utc); iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    event = {
-        "threatId": "-".join(_b32(n) for n in (8, 4, 4, 12)),
-        "fromName": sender_name, "fromAddress": sender,
-        "senderIpAddress": random.choice(EXTERNAL_IPS),
-        "recipientAddress": recipient, "toAddresses": recipient,
-        "subject": subject, "attackType": attack, "attackVector": vector,
-        "attackStrategy": strategy,
-        "impersonatedParty": strategy if "Impersonation" in strategy else "None / Others",
-        "attachmentNames": [attachment] if attachment else [],
-        "urls": [url] if url else [],
-        "receivedTime": iso, "sentTime": iso, "remediationStatus": remediation,
-    }
-    sev = 4 if remediation != "Auto-Remediated" else 5
-    return rfc5424(sev, 13, "abnormal-relay01.cia.gov", "abnormal", "-", "EMAIL",
-                   json.dumps(event, separators=(",", ":")))
 
 def _db_line(user: str, obj: str, cmd: str, cls: str, stmt: str, rows: int) -> str:
     sid = random.randint(1, 99999)
@@ -1522,9 +1590,9 @@ def sc_phish_landy():
     phish_domain = "cia-portal.example.net"
     ip = "185.220.101.45"
     return ("Spearphish — Langley credential theft (initial access)", [
-        _email_line("pamela.landy@cia.gov", "Langley Security", "security-alert@"+phish_domain,
-                    "ACTION REQUIRED: verify your Langley credentials", "Phishing: Credential",
-                    "Link", "Name Impersonation", "Not Remediated", url="http://"+phish_domain+"/login"),
+        _email_line(_mimecast_event(recipient="pamela.landy@cia.gov", sender_name="Langley Security",
+                    sender="security-alert@"+phish_domain, subject="ACTION REQUIRED: verify your Langley credentials",
+                    malicious=True, category="phish", blocked=False, url="http://"+phish_domain+"/login")),
         _dns_line("langley-dc01.cia.gov", "10.0.1.10", phish_domain, "A", sev=4),
         _proxy_line("web-proxy01.cia.gov", "10.0.1.10", "TCP_MISS", 200, 14233, "GET",
                     "http://"+phish_domain+"/login", "pamela.landy", "HIER_DIRECT/"+ip, "text/html"),
@@ -1670,9 +1738,10 @@ def sc_langley_insider_leak():
                   "TargetDomainName": "CIA", "IpAddress": ip}),
         _db_line("jack.kublinski", "public.cover_identities", "SELECT", "READ",
                  "SELECT alias,passport FROM cover_identities", 1204),
-        _email_line("jack.kublinski@cia.gov", "Jack Kublinski", "j.kublinski@cia-gov.example.org",
-                    "Blackbriar — your source is exposed", "Business Email Compromise", "Text",
-                    "Internal - Executive", "Not Remediated"),
+        _email_line(_mimecast_event(recipient="jack.kublinski@cia.gov", sender_name="Jack Kublinski",
+                    sender="j.kublinski@cia-gov.example.org", subject="Blackbriar — your source is exposed",
+                    direction="outbound", event_type="TTP Impersonation Protection",
+                    malicious=True, blocked=False)),
         _sudo_line("langley-annex02.cia.gov", "jack.kublinski", "/bin/cp /etc/shadow /tmp/.hidden_s"),
         _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009106: IDS:9106 Insider Exfil Pattern - Kublinski Signature from 10.0.0.1 to 172.16.0.1 on interface inside [ASSET:ASSET-JARDA]", sev=2),
     ])

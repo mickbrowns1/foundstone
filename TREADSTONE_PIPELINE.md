@@ -38,8 +38,8 @@ for the JSON sources (Duo / Abnormal email / Windows).
 
 | `msgid` | source | `message` is |
 |---|---|---|
-| `DUO`, `EMAIL`, `WINEVENT`, `CLOUDTRAIL` | Cisco Duo, Abnormal email, Windows Security, AWS CloudTrail | **JSON** |
-| `ASA302013`/`…`/`ASA400`, `SSHD`, `SUDO`, `PAM`, `HTTP`, `CRON`, `AUDIT`, `DNS`, `DBAUDIT`, `PROXY` | everything else | **plain text** |
+| `DUO`, `EMAIL`, `WINEVENT`, `CLOUDTRAIL`, `PROXY` | Cisco Duo, Mimecast, Windows Security, AWS CloudTrail, Zscaler Internet Access | **JSON** |
+| `ASA302013`/`…`/`ASA400`, `SSHD`, `SUDO`, `PAM`, `HTTP`, `CRON`, `AUDIT`, `DNS`, `DBAUDIT` | everything else | **plain text** |
 
 ## Pipeline requirements (DataPipeline side)
 
@@ -53,7 +53,7 @@ A parse-json applied to the whole feed throws
 (their `message` starts with `%ASA-…`, `client @…`, etc., not `{`). Run it **only** on JSON:
 
 ```
-parse_json(message)  WHEN  msgid in ('DUO','EMAIL','WINEVENT','CLOUDTRAIL')
+parse_json(message)  WHEN  msgid in ('DUO','EMAIL','WINEVENT','CLOUDTRAIL','PROXY')
 # or, source-agnostic (auto-handles future JSON sources):
 parse_json(message)  WHEN  message starts_with '{'
 ```
@@ -73,10 +73,47 @@ matches an envelope/reserved key collides (type conflicts, duplicate keys).
 - **Octet-counting framing:** generator → syslog-ng uses RFC 6587 octet counts with **no trailing delimiter** (a trailing `\n` desyncs the strict `syslog()` source).
 - **Reliability:** 256 MB disk-buffer + retries absorb DataPipeline outages.
 
+## dataSource.name / dataSource.category tagging
+
+Every source gets `dataSource.name` (grounded in this tenant's own deployed
+rule library where a real value exists -- see `data/extracted.json`) and
+`dataSource.category = "security"` (not used by any deployed rule as a
+filter, but drives SDL's own data-view bucketing).
+
+This is applied **centrally in the Lua processor stage**
+(`datapipeline/parse_json_by_msgid.lua`'s `DATASOURCE_BY_MSGID` lookup),
+not in the Python generator, and applies to *every* msgid -- JSON or plain
+text -- before the JSON-only gating happens. This was a deliberate choice
+over setting it via syslog-ng's `fields.*` HEC mechanism: that would create
+the field at the envelope level for every event (including JSON ones,
+which build their own nested `dataSource` structure via `parse_json`),
+risking a duplicate/conflicting `dataSource.name` value between the
+envelope and the parsed JSON. Centralizing it in the one Lua stage that
+already runs last avoids that risk entirely, and means adding a new source
+only requires one line in `DATASOURCE_BY_MSGID`.
+
+SentinelOne EDR is the exception (see below) -- it sets `dataSource`
+directly in the Python event builder, since it bypasses this Lua stage
+(and DataPipeline) entirely.
+
+| `msgid` | `dataSource.name` | Real rule match? |
+|---|---|---|
+| `S1EDR` | `SentinelOne` | Yes (973 rules) |
+| `CLOUDTRAIL` | `CloudTrail` | Yes (435 rules) |
+| `WINEVENT` | `Windows Event Logs` | Yes (59 rules) |
+| `DUO` | `Cisco Duo` | Yes (24 rules) |
+| `ASA*` | `Cisco Firewall Threat Defense` | Yes (26 rules) -- name matches; log *format* is classic ASA syslog, not real FTD's |
+| `PROXY` | `Zscaler Internet Access` | Yes (49 rules) -- name and field shape both match |
+| `EMAIL` | `Mimecast` | Yes (15 rules) -- name and field shape both match |
+| `SSHD`, `SUDO`, `PAM`, `CRON`, `AUDIT` | `Linux Audit` | No real match in this tenant's library -- invented |
+| `HTTP` | `Apache HTTP Server` | No real match -- invented |
+| `DNS` | `ISC BIND` | No real match -- invented |
+| `DBAUDIT` | `PostgreSQL` | No real match -- invented |
+
 ## Identity correlation
 
 For cross-source identity joins (e.g. phish → suspicious auth), the canonical identity is
-`<name>@cia.gov`: Duo `email`, Abnormal `recipientAddress`, and Windows `TargetUserName`
+`<name>@cia.gov`: Duo `email`, Mimecast `email.to`, and Windows `TargetUserName`
 all align on it. Duo's `user.name` retains the **cover identity** (alias) for flavor —
 don't join on it.
 

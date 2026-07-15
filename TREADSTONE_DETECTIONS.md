@@ -14,11 +14,13 @@ line in `message`.
 | Source (`msgid`) | Fields you query |
 |---|---|
 | `DUO` | `result`, `reason`, `factor`, `email`, `user.name`, `access_device.ip`, `access_device.location.country`, `auth_device.ip`, `application.name` |
-| `EMAIL` | `attackType`, `attackVector`, `recipientAddress`, `fromAddress`, `senderIpAddress`, `remediationStatus`, `subject` |
+| `EMAIL` (Mimecast) | `direction`, `status_detail`, `actor.invoked_by`, `event.type`, `email.from`, `email.to`, `email.subject`, `unmapped.category`, `unmapped.action`, `unmapped.taggedMalicious`, `file.type`, `file.name` |
 | `WINEVENT` | `EventID`, `TicketEncryptionType`, `TargetUserName`, `ServiceName`, `IpAddress`, `LogonType`, `CommandLine`, `SubjectUserName`, `Computer` |
 | `CLOUDTRAIL` | `eventName`, `eventSource`, `sourceIPAddress`, `recipientAccountId`, `errorCode`, `userIdentity.type`, `userIdentity.arn`, `userIdentity.sessionContext.attributes.mfaAuthenticated`, `requestParameters.*` |
+| `PROXY` (Zscaler) | `action`, `app_name`, `risk_details`, `http_request.url.hostname`, `http_request.url.categories`, `malware.name`, `unmapped.event.threatcat` |
 | `S1EDR` | `event.type`, `endpoint.os`, `endpoint.name`, `tgt.process.cmdline`, `tgt.process.name`, `src.process.cmdline`, `src.process.parent.name`, `tgt.file.path`, `registry.keyPath`, `task.path`, `module.path`, `cmdScript.content`, `event.dns.request`, `indicator.name` |
-| text (`ASA*`,`DNS`,`DBAUDIT`,`PROXY`,`SSHD`,`SUDO`,`PAM`,`HTTP`,`CRON`,`AUDIT`) | raw line in `message` |
+| text (`ASA*`,`DNS`,`DBAUDIT`,`SSHD`,`SUDO`,`PAM`,`HTTP`,`CRON`,`AUDIT`) | raw line in `message` |
+| every source | `dataSource.name`, `dataSource.category` — see `TREADSTONE_PIPELINE.md`'s tagging table |
 
 > **If a JSON-source query returns zero, it's one of two things:**
 > 1. **`EventID` typed as a string** → change `EventID = 4769` to `EventID = '4769'`. (Probe: `msgid='WINEVENT' | group n=count() by EventID`.)
@@ -31,14 +33,24 @@ line in `message`.
 
 ## A. Technique detections
 
-### A1 — Spearphish: inbound malicious email not auto-remediated  ·  T1566
+### A1 — Spearphish: malicious inbound email delivered without being blocked  ·  T1566
+> `unmapped.action` always has a concrete value in this simulator (`none` vs
+> `hold`/`block`/`bounce`), never omitted, so "not blocked" is a clean filter
+> rather than a check for field absence.
 ```
-msgid = 'EMAIL' remediationStatus != 'Auto-Remediated'
+msgid = 'EMAIL' direction = 'inbound' status_detail = 'malicious' unmapped.action contains 'none'
 | group threats=count(),
-        attacks=array_agg_distinct(attackType, 5),
-        senders=array_agg_distinct(fromAddress, 5)
-  by recipientAddress
+        categories=array_agg_distinct(unmapped.category, 5),
+        senders=array_agg_distinct(email.from, 5)
+  by email.to
 | sort -threats
+```
+
+### A1b — Internal impersonation email not blocked  ·  T1656
+```
+msgid = 'EMAIL' event.type = 'TTP Impersonation Protection' unmapped.taggedMalicious = true unmapped.action contains 'none'
+| group hits=count() by email.from, email.to
+| sort -hits
 ```
 
 ### A2 — DNS beaconing to a C2 / dead-drop domain  ·  T1071.004  *(text → message)*
@@ -113,11 +125,11 @@ msgid = 'DUO' result = 'success'
 
 ### B2 — Phish → suspicious auth (same mailbox)  ·  T1566 → T1078
 > Joins on `email`. Works now that Duo's `email` is the canonical corporate
-> identity (matches Email `recipientAddress`).
+> identity (matches Mimecast `email.to`).
 ```
 | join
     (msgid = 'EMAIL'
-       | group 1 by email=recipientAddress),
+       | group 1 by email=email.to),
     (msgid = 'DUO'
        | filter result = 'fraud' || reason = 'anomalous_push'
        | group bad_auths=count() by email)
@@ -137,6 +149,8 @@ msgid = 'DUO' result = 'success'
 ```
 
 ### B4 — Exfil chain: large DB read → large outbound proxy transfer  ·  T1213 → T1041
+> `bytes` is a real numeric field on the Zscaler event (not a string to regex-match),
+> so this uses a numeric threshold instead of the old digit-count regex.
 ```
 | join
     (msgid = 'DBAUDIT'
@@ -144,10 +158,8 @@ msgid = 'DUO' result = 'success'
        | parse '$dbuser$@$db$ LOG:' from message
        | group reads=count() by dbuser),
     (msgid = 'PROXY'
-       | filter message contains 'TCP_TUNNEL' || message contains 'exfil-relay'
-       | parse '$ts$ $el$ $client$ $code$ $bytes$ $method$ $url$ $user$ ' from message
-       | filter bytes matches '[0-9]{7,}'
-       | group egress=count(), urls=array_agg_distinct(url, 5) by user)
+       | filter action = 'Allowed' && bytes >= 1000000
+       | group egress=count(), hosts=array_agg_distinct(http_request.url.hostname, 5) by user=user.name)
   on dbuser = user
 ```
 
@@ -302,7 +314,7 @@ Scenario → detection it lights up:
 | Fire this scenario | Triggers |
 |---|---|
 | `phish_landy` | A1 (phish), **B2** (phish→auth) |
-| `langley_insider_leak` | A1 (BEC not auto-remediated), A5 (DB read ≥1000 rows) |
+| `langley_insider_leak` | **A1b** (internal impersonation not blocked), A5 (DB read ≥1000 rows) |
 | `dns_beacon` | **A2** (beaconing) |
 | `dns_tunnel_exfil` | **A3** (tunneling), A5 (DB read), **C3** (references `neski_files`) |
 | `kerberoast` | **A4** (kerberoasting) |
