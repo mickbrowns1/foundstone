@@ -217,17 +217,19 @@ Scenario → detection it lights up:
 | Fire this scenario | Triggers |
 |---|---|
 | `phish_landy` | A1 (phish), **B2** (phish→auth) |
+| `langley_insider_leak` | A1 (BEC not auto-remediated), A5 (DB read ≥1000 rows) |
 | `dns_beacon` | **A2** (beaconing) |
-| `dns_tunnel_exfil` | **A3** (tunneling), A5 (DB read) |
+| `dns_tunnel_exfil` | **A3** (tunneling), A5 (DB read), **C3** (references `neski_files`) |
 | `kerberoast` | **A4** (kerberoasting) |
 | `db_mass_extract` | A5 (mass read), **B4** (DB→proxy exfil) |
 | `lateral_langley` | **A6a** (spray), **A6b** (mimikatz) |
-| `goa_kirill` / `tangier_desh` / `zurich_bank` / `amsterdam_deaddrop` / `vienna_rendezvous` | **B3** (beacon+fraud), C-series |
+| `goa_kirill` / `zurich_bank` / `amsterdam_deaddrop` / `vienna_rendezvous` | **B3** (beacon+fraud), C-series |
 | `waterloo_ross` / `paris_safehouse` / `petra_handler_betrayal` | **C1/C2** (kill-order C2, authorize-kill) |
+| `tangier_desh` | **C1** only (kill-order C2 channel; no `authorize_kill.py` call, so C2 doesn't fire) |
 | `berlin_neski` | **C3** (Neski files) |
 | `reykjavik_hack` / `vegas_dewey` / `deepdream_cyberops` | **C4** (Reykjavik/Deep Dream) |
 | (any with Duo logins across cities) | **B1** (impossible travel) — fire 2+ different-city scenarios |
-| `rome_extraction_blown` / `copenhagen_sigint` / `langley_insider_leak` / `ny_treadstone_induction` / `larx_handoff` / `east_berlin_origin` / `mckenna_awakening` / `seoul_pak_awakening` | story color — no dedicated detection yet (same as `goa_kirill`/`athens_riots`) |
+| `rome_extraction_blown` / `copenhagen_sigint` / `ny_treadstone_induction` / `larx_handoff` / `east_berlin_origin` / `mckenna_awakening` / `seoul_pak_awakening` | story color — no dedicated detection yet (same as `goa_kirill`/`athens_riots`) |
 
 Then run the detection over the last few minutes and confirm the hits.
 ```

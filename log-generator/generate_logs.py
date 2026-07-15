@@ -1090,6 +1090,7 @@ def sc_zurich_bank():
         _http_line("blackbriar-db01.cia.gov", ip, "john.michael.kane", "GET", "/intel/db/passport?name=john+michael+kane", 200, 4096),
         _sudo_line("blackbriar-db01.cia.gov", "noah.vosen", "/usr/bin/grep -r 'John Michael Kane' /intel/db/passports/"),
         _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.0.1.10 on interface outside [ASSET:ASSET-ROMEO]", sev=2),
+        _duo_line("duo-authproxy02.cia.gov", "john.michael.kane", "TREADSTONE", "Gemeinschaft Bank Portal", ip, "fraud", "user_marked_fraud"),
         _proxy_line("embassy-zurich-fw01.cia.gov", "10.1.0.50", "TCP_TUNNEL", 200, 81233, "CONNECT", "gemeinschaft-bank.example.net:443", "john.michael.kane", "HIER_DIRECT/"+ip, "-"),
     ])
 
@@ -1120,7 +1121,7 @@ def sc_goa_kirill():
     """SUPREMACY — Kirill tracks Bourne to Goa; Marie is killed."""
     ip, host = "188.40.75.132", "safehouse-goa-01.cia.gov"
     return ("Goa — Kirill closes in (Marie)", [
-        _duo_line("duo-authproxy02.cia.gov", "g.volkov", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "denied", "anomalous_push"),
+        _duo_line("duo-authproxy02.cia.gov", "g.volkov", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "fraud", "user_marked_fraud"),
         _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.0.1.11 on interface outside [ASSET:ASSET-KIRILL]", sev=2),
         _ssh_line(host, "Accepted publickey for marie.kreutz from "+ip+" port 49888 ssh2: RSA SHA256:"+_fake_sha256()),
         _audit_line(host, ip, "10.2.5.100", 22),
@@ -1309,7 +1310,7 @@ def sc_amsterdam_deaddrop():
     ip, host = "83.245.10.55", "safehouse-amsterdam-01.cia.gov"
     return ("Amsterdam — canal-district dead drop (Kirilenko)", [
         _dns_line(host, "10.6.5.100", "deaddrop-amsterdam.example.net", "A", sev=4),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009104: IDS:9104 Amsterdam Dead-Drop Signal Detected from "+ip+" to 10.6.5.100 on interface outside [ASSET:ASSET-AMSTERDAM]", sev=2),
+        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.6.5.100 on interface outside [ASSET:ASSET-AMSTERDAM]", sev=2),
         _duo_line("duo-authproxy02.cia.gov", "o.kirilenko", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "fraud", "user_marked_fraud"),
         _ssh_line(host, "Accepted publickey for frank.meyer from "+ip+" port 50142 ssh2: RSA SHA256:"+_fake_sha256()),
         _proxy_line(host, "10.6.5.100", "TCP_TUNNEL", 200, 33221, "CONNECT", "deaddrop-amsterdam.example.net:443", "frank.meyer", "HIER_DIRECT/"+ip, "-"),
@@ -1321,7 +1322,7 @@ def sc_vienna_rendezvous():
     return ("Vienna — Szabo rendezvous under surveillance", [
         _duo_line("duo-authproxy01.cia.gov", "t.stack", "BLACKBRIAR", "Vienna Consulate VPN", ip, "success", "user_approved"),
         _http_line(host, ip, "tom.stack", "GET", "/intel/db/search?q=szabo+viktor", 200, 8811),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009105: IDS:9105 Vienna Rendezvous Beacon from "+ip+" to 10.7.5.100 on interface outside [ASSET:ASSET-VIENNA]", sev=2),
+        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.7.5.100 on interface outside [ASSET:ASSET-VIENNA]", sev=2),
         _duo_line("duo-authproxy01.cia.gov", "v.szabo", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "fraud", "user_marked_fraud"),
         _ssh_line(host, "Failed password for invalid user v.szabo from "+ip+" port 50877 ssh2", sev=4),
     ])
