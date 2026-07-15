@@ -17,6 +17,7 @@ line in `message`.
 | `EMAIL` | `attackType`, `attackVector`, `recipientAddress`, `fromAddress`, `senderIpAddress`, `remediationStatus`, `subject` |
 | `WINEVENT` | `EventID`, `TicketEncryptionType`, `TargetUserName`, `ServiceName`, `IpAddress`, `LogonType`, `CommandLine`, `SubjectUserName`, `Computer` |
 | `CLOUDTRAIL` | `eventName`, `eventSource`, `sourceIPAddress`, `recipientAccountId`, `errorCode`, `userIdentity.type`, `userIdentity.arn`, `userIdentity.sessionContext.attributes.mfaAuthenticated`, `requestParameters.*` |
+| `S1EDR` | `event.type`, `endpoint.os`, `endpoint.name`, `tgt.process.cmdline`, `tgt.process.name`, `src.process.cmdline`, `src.process.parent.name`, `tgt.file.path`, `registry.keyPath`, `task.path`, `module.path`, `cmdScript.content`, `event.dns.request`, `indicator.name` |
 | text (`ASA*`,`DNS`,`DBAUDIT`,`PROXY`,`SSHD`,`SUDO`,`PAM`,`HTTP`,`CRON`,`AUDIT`) | raw line in `message` |
 
 > **If a JSON-source query returns zero, it's one of two things:**
@@ -226,6 +227,51 @@ msgid = 'CLOUDTRAIL' eventName = 'ConsoleLogin' userIdentity.sessionContext.attr
 
 ---
 
+## E. SentinelOne EDR detections
+
+Field names and the `event.type` set here are grounded directly in this
+tenant's own deployed detection library (746 real `SentinelOne`-sourced
+rules in `data/extracted.json`) rather than guessed — `event.type` is
+overwhelmingly `Process Creation` in practice. Ambient traffic is signed,
+known-publisher, ordinary parent/child process trees (see `EDR_BENIGN_PROCS`
+in `generate_logs.py`); credential dumping, reverse shells, and persistence
+only ever appear in the dedicated EDR scenarios.
+
+Unlike every other source in this simulator, `S1EDR` events bypass
+syslog-ng/DataPipeline and are ingested directly into SDL — see
+[TREADSTONE_PIPELINE.md](TREADSTONE_PIPELINE.md#sentinelone-edr-direct-to-sdl-not-datapipeline).
+No console pipeline changes are needed for these queries to work.
+
+### E1 — Credential dumping via mimikatz  ·  T1003.001
+```
+dataSource.name = 'SentinelOne' event.type = 'Process Creation' tgt.process.cmdline contains 'sekurlsa::logonpasswords'
+| group hits=count(), hosts=array_agg_distinct(endpoint.name, 5) by tgt.process.user
+| sort -hits
+```
+
+### E2 — Reverse shell via netcat  ·  T1059
+```
+dataSource.name = 'SentinelOne' event.type = 'Process Creation' tgt.process.name = 'nc' tgt.process.cmdline contains ' -e'
+| group hits=count(), targets=array_agg_distinct(tgt.process.cmdline, 5) by endpoint.name
+| sort -hits
+```
+
+### E3 — Suspicious scheduled task registration  ·  T1053.005
+```
+dataSource.name = 'SentinelOne' event.type = 'Task Register'
+| group hits=count(), tasks=array_agg_distinct(task.path, 5) by src.process.user
+| sort -hits
+```
+
+### E4 — DNS resolution to known exfil infrastructure (EDR view)  ·  T1071.004
+```
+dataSource.name = 'SentinelOne' event.type = 'DNS Resolved' event.dns.request contains ('exfil-relay', 'deaddrop', 'sigint-cache', 'beacon.treadstone')
+| group hits=count() by endpoint.name, event.dns.request
+| sort -hits
+```
+
+---
+
 ## Promoting to detection rules
 
 To turn a hunt into a STAR / Custom Detection / PowerQuery Alert:
@@ -270,6 +316,10 @@ Scenario → detection it lights up:
 | (any with Duo logins across cities) | **B1** (impossible travel) — fire 2+ different-city scenarios |
 | `aws_privesc_kublinski` | **D3** (IAM privilege escalation via policy attachment) |
 | `aws_defense_evasion_petra` | **D1** (root usage), **D2** (logging disabled), **D4** (console login without MFA) |
+| `edr_mimikatz_langley` | **E1** (mimikatz) — EDR companion to `lateral_langley` |
+| `edr_reverse_shell_petra` | **E2** (reverse shell) — EDR companion to `petra_handler_betrayal` |
+| `edr_task_persistence_mckenna` | **E3** (scheduled task) — EDR companion to `mckenna_awakening` |
+| `edr_dns_exfil_neski` | **E4** (DNS exfil) — EDR companion to `dns_tunnel_exfil` |
 | `rome_extraction_blown` / `copenhagen_sigint` / `ny_treadstone_induction` / `larx_handoff` / `east_berlin_origin` / `mckenna_awakening` / `seoul_pak_awakening` | story color — no dedicated detection yet (same as `goa_kirill`/`athens_riots`) |
 
 Then run the detection over the last few minutes and confirm the hits.

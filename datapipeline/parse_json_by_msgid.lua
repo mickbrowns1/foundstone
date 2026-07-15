@@ -20,6 +20,8 @@ local json = require('json')
 local log = require('log')
 
 -- msgid values whose message field is a JSON string, per TREADSTONE_PIPELINE.md.
+-- (SentinelOne EDR events never reach this pipeline at all -- they're ingested
+-- directly into SDL, bypassing DataPipeline entirely. See TREADSTONE_PIPELINE.md.)
 local JSON_MSGIDS = { DUO = true, EMAIL = true, WINEVENT = true, CLOUDTRAIL = true }
 
 -- Envelope/reserved keys DataPipeline already owns at the document root.

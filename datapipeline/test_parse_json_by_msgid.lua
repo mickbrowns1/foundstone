@@ -85,6 +85,8 @@ assert_eq(r2b.sourceIPAddress, "160.153.0.12", "CLOUDTRAIL sourceIPAddress promo
 assert_eq(r2b.responseElements, nil, "CLOUDTRAIL top-level null stripped to nil")
 
 -- 3. Non-JSON msgid: pass through completely unchanged, no decode attempted.
+-- (S1EDR isn't listed here either -- those events never reach this pipeline
+-- at all; they're ingested directly into SDL. See TREADSTONE_PIPELINE.md.)
 local asa_event = { msgid = "ASA302013", message = "%ASA-6-302013: Built inbound TCP connection ..." }
 local r3 = processEvent(asa_event)
 assert_eq(r3.message, asa_event.message, "ASA message passed through unchanged")

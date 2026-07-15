@@ -12,8 +12,11 @@ services:
     restart: unless-stopped
 
   # ── Treadstone log simulator (Jason Bourne universe synthetic logs) ──
-  # log-generator -> syslog-ng -> DataPipeline HEC -> SDL. See TREADSTONE_PIPELINE.md
-  # and TREADSTONE_DETECTIONS.md. Requires HEC_URL / HEC_TOKEN in .env.
+  # Most sources: log-generator -> syslog-ng -> DataPipeline HEC -> SDL. Requires
+  # HEC_URL / HEC_TOKEN in .env. SentinelOne EDR events bypass this path entirely
+  # and post directly into SDL (real EDR telemetry doesn't flow through a
+  # customer's DataPipeline either) -- see TREADSTONE_PIPELINE.md and
+  # TREADSTONE_DETECTIONS.md.
   syslog-ng:
     build:
       context: ./syslog-ng
@@ -45,6 +48,10 @@ services:
       - LOG_INTERVAL_MS=${LOG_INTERVAL_MS:-1500}
       - LOG_BURST=${LOG_BURST:-5}
       - SCENARIO_CHANCE=${SCENARIO_CHANCE:-0.02}
+      # For direct SentinelOne EDR ingestion only (bypasses DataPipeline) --
+      # reuses the same SDL credentials already configured for FoundStone itself.
+      - SDL_BASE_URL=${SDL_BASE_URL}
+      - SDL_WRITE_TOKEN=${SDL_WRITE_TOKEN}
     networks:
       - log-net
 

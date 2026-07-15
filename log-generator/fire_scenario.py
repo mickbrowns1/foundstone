@@ -33,7 +33,8 @@ def fire(funcs, count):
         for fn in funcs:
             title, lines = fn()
             for line in lines:
-                s.sendall(line.encode("utf-8"))
+                if line is not None:  # EDR lines are ingested directly into SDL, nothing to send here
+                    s.sendall(line.encode("utf-8"))
             total += len(lines)
             print(f"  fired: {title}  ({len(lines)} events)")
     s.close()

@@ -142,9 +142,11 @@ log-generator ──RFC 5424/6587 over TCP──▶ syslog-ng ──HEC (one POS
 
 **On-prem sources:** Cisco ASA firewall, Linux sshd/sudo/PAM/cron, Apache access logs, Cisco Duo MFA, Squid web proxy, ISC BIND DNS, Abnormal Security email threats, PostgreSQL pgAudit, Windows Security Events.
 
-**AWS (CloudTrail):** modeled as a **hardened** AWS Organization on purpose — MFA-enforced `AssumeRole` sessions only (no root usage, no long-lived access keys in normal traffic), encrypted S3 (SSE-KMS), least-privilege roles per program, and API calls only ever from known corporate egress IPs. Root usage, disabled logging, privilege escalation, and MFA-less logins are deliberately **never** ambient — they only appear inside the two dedicated attack scenarios, so a detection firing on them means something actually happened.
+**AWS (CloudTrail):** modeled as a **hardened** AWS Organization on purpose — MFA-enforced `AssumeRole` sessions only (no root usage, no long-lived access keys in normal traffic), encrypted S3 (SSE-KMS), least-privilege roles per program, and API calls only ever from known corporate egress IPs. Root usage, disabled logging, privilege escalation, and MFA-less logins are deliberately **never** ambient — they only appear inside the dedicated attack scenarios, so a detection firing on them means something actually happened.
 
-31 scripted, correlated attack scenarios spanning all 5 Bourne films, the 2019 *Treadstone* TV series, and two AWS-specific scenarios — each emits a short burst of events across multiple sources sharing actors/hosts/IPs, so you can pivot host→user→IP across firewall, identity, proxy, DB, and cloud logs. Full list and detection mappings: [TREADSTONE_DETECTIONS.md](TREADSTONE_DETECTIONS.md).
+**SentinelOne EDR:** schema grounded directly in this tenant's own deployed detection library (746 real `SentinelOne`-sourced rules in `data/extracted.json`) rather than guessed — `event.type` distribution mirrors real usage (`Process Creation` dominant, plus File/Registry/Task/Network/DNS/Behavioral Indicator events). Ambient traffic is signed, known-publisher, ordinary parent/child process trees; credential dumping, reverse shells, and persistence mechanisms only appear in dedicated scenarios.
+
+35 scripted, correlated attack scenarios spanning all 5 Bourne films, the 2019 *Treadstone* TV series, AWS, and SentinelOne EDR — each emits a short burst of events across multiple sources sharing actors/hosts/IPs, so you can pivot host→user→IP across firewall, identity, proxy, DB, cloud, and EDR telemetry. Several EDR scenarios are direct companions to existing storylines (e.g. `edr_mimikatz_langley` alongside `lateral_langley`). Full list and detection mappings: [TREADSTONE_DETECTIONS.md](TREADSTONE_DETECTIONS.md).
 
 ### Starting it
 
@@ -158,6 +160,8 @@ docker compose up -d --build syslog-ng log-generator
 ```
 
 You'll also need a **Lua processor stage** in the DataPipeline pipeline itself — the built-in `parse_json` step has no per-source gating and throws on the plain-text sources. Use [datapipeline/parse_json_by_msgid.lua](datapipeline/parse_json_by_msgid.lua) (verified locally with `datapipeline/test_parse_json_by_msgid.lua`); see [TREADSTONE_PIPELINE.md](TREADSTONE_PIPELINE.md) for the full integration notes (field collisions, sourcetype routing, reliability behavior).
+
+**SentinelOne EDR events don't go through any of this** — they bypass syslog-ng/DataPipeline entirely and post straight into SDL (matching how real EDR telemetry actually arrives), reusing the `SDL_BASE_URL`/`SDL_WRITE_TOKEN` already in `.env` for FoundStone itself. No console changes needed for these.
 
 ### Firing scenarios on demand
 
@@ -216,7 +220,7 @@ foundstone/
   docker-compose.yml
 
 log-generator/            # Treadstone Log Simulator — synthetic event generator
-  generate_logs.py         # Ambient generators + 31 scripted scenarios
+  generate_logs.py         # Ambient generators + 35 scripted scenarios
   fire_scenario.py         # CLI to fire scenarios on demand
   preview.py
 
