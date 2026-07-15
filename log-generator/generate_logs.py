@@ -98,6 +98,15 @@ OPERATIVES = [
     # ── Foreign adversaries (expanded) ──
     {"name": "olga.kirilenko",  "alias": "o.kirilenko",        "uid": 1041, "clearance": "HOSTILE"},
     {"name": "viktor.szabo",    "alias": "v.szabo",            "uid": 1042, "clearance": "HOSTILE"},
+    # ── Treadstone (2019 TV series) — Cold War origin + awakened sleepers ──
+    {"name": "randolph.bentley","alias": "j.r.bentley",        "uid": 1047, "clearance": "TREADSTONE"},
+    {"name": "doug.mckenna",    "alias": "d.mckenna",          "uid": 1048, "clearance": "TREADSTONE"},
+    {"name": "soyun.pak",       "alias": "s.pak",              "uid": 1049, "clearance": "TREADSTONE"},
+    {"name": "tara.coleman",    "alias": "t.coleman",          "uid": 1050, "clearance": "BLACKBRIAR"},
+    {"name": "matt.edwards",    "alias": "m.edwards",          "uid": 1051, "clearance": "BLACKBRIAR"},
+    {"name": "petra",           "alias": "p.hollander",        "uid": 1052, "clearance": "HOSTILE"},
+    {"name": "ellen.becker",    "alias": "e.becker",           "uid": 1053, "clearance": "BLACKBRIAR"},
+    {"name": "manheim",         "alias": "k.manheim",          "uid": 1054, "clearance": "TREADSTONE"},
 ]
 
 # CIA / Treadstone internal network hosts
@@ -140,6 +149,10 @@ INTERNAL_HOSTS = [
     "station-newdelhi-01.cia.gov",
     "safehouse-amsterdam-01.cia.gov",
     "langley-annex02.cia.gov",
+    # Treadstone (2019 TV series) locations
+    "station-hamburg-01.cia.gov",
+    "station-seoul-01.cia.gov",
+    "outpost-tulsa-ok.cia.gov",
 ]
 
 # External / adversary IPs (plausible fiction — RFC 5737 test ranges + routable)
@@ -169,6 +182,9 @@ EXTERNAL_IPS = [
     "151.38.22.10",    # "Rome — extraction team compromised"
     "195.184.104.13",  # "Copenhagen — SIGINT intercept"
     "103.27.9.44",     # "New Delhi — LARX regional relay"
+    "217.110.15.66",   # "Hamburg — Manheim safehouse"
+    "121.78.55.12",    # "Seoul — Pak awakening trigger"
+    "173.245.10.88",   # "Tulsa, OK — McKenna sleeper activation"
 ]
 
 INTERNAL_IPS = [
@@ -176,6 +192,7 @@ INTERNAL_IPS = [
     "10.1.0.50", "10.1.0.51", "10.2.5.100", "172.16.10.5",
     "172.16.10.6", "172.20.0.1", "192.168.10.15", "192.168.10.16",
     "10.6.5.100", "10.7.5.100", "10.8.5.100", "10.9.5.100",
+    "10.10.5.100", "10.11.5.100", "10.12.5.100",
 ]
 
 # Geolocation for each external IP — used by Cisco Duo's access_device.location
@@ -203,6 +220,9 @@ IP_GEO = {
     "151.38.22.10":   {"city": "Rome",     "state": "Lazio",         "country": "Italy"},
     "195.184.104.13": {"city": "Copenhagen","state": "Capital Region","country": "Denmark"},
     "103.27.9.44":    {"city": "New Delhi","state": "Delhi",         "country": "India"},
+    "217.110.15.66":  {"city": "Hamburg",  "state": "Hamburg",       "country": "Germany"},
+    "121.78.55.12":   {"city": "Seoul",    "state": "Seoul",         "country": "South Korea"},
+    "173.245.10.88":  {"city": "Tulsa",    "state": "Oklahoma",      "country": "United States"},
     "203.0.113.77":   {"city": "Unknown",  "state": "Unknown",       "country": "Unknown"},
     "198.51.100.23":  {"city": "Unknown",  "state": "Unknown",       "country": "Unknown"},
     "192.0.2.145":    {"city": "Unknown",  "state": "Unknown",       "country": "Unknown"},
@@ -225,6 +245,8 @@ DUO_APPLICATIONS = [
     "Deep Dream Cyber Ops Console",
     "Insider Threat Review Portal",
     "Vienna Consulate VPN",
+    "Treadstone Sleeper Activation Portal",
+    "East Berlin Archive Access",
 ]
 
 # Duo Authentication Proxy hosts that emit the logs
@@ -360,6 +382,9 @@ ASA_FIREWALLS = [
     {"host": "station-vienna-01.cia.gov",     "ip": "10.7.0.1", "fw_id": "FW-VIE-01"},
     {"host": "station-copenhagen-01.cia.gov", "ip": "10.8.0.1", "fw_id": "FW-CPH-01"},
     {"host": "station-newdelhi-01.cia.gov",   "ip": "10.9.0.1", "fw_id": "FW-DEL-01"},
+    {"host": "station-hamburg-01.cia.gov",    "ip": "10.10.0.1", "fw_id": "FW-HAM-01"},
+    {"host": "station-seoul-01.cia.gov",      "ip": "10.11.0.1", "fw_id": "FW-SEL-01"},
+    {"host": "outpost-tulsa-ok.cia.gov",      "ip": "10.12.0.1", "fw_id": "FW-TUL-01"},
 ]
 
 # Asset codenames + the on-screen assassins they map to
@@ -369,7 +394,7 @@ BLACKBRIAR_ASSETS = [
     "ASSET-DESH",   "ASSET-PAZ",     "ASSET-PROFESSOR",
     "ASSET-CASTEL", "ASSET-JARDA",   "ASSET-KIRILL",
     "ASSET-IRONHAND", "ASSET-VIENNA", "ASSET-AMSTERDAM",
-    "ASSET-DELHI",
+    "ASSET-DELHI", "ASSET-MCKENNA", "ASSET-PAK", "ASSET-BENTLEY",
 ]
 
 HTTP_PATHS = [
@@ -528,6 +553,7 @@ def gen_asa_ids_alert() -> str:
         ("9104",  "Amsterdam Dead-Drop Signal Detected"),
         ("9105",  "Vienna Rendezvous Beacon"),
         ("9106",  "Insider Exfil Pattern — Kublinski Signature"),
+        ("9107",  "Treadstone Sleeper Activation Beacon"),
     ]
     sig_id, sig_name = random.choice(sigs)
     asset = random.choice(BLACKBRIAR_ASSETS)
@@ -1374,6 +1400,51 @@ def sc_larx_handoff():
         _http_line(host, ip, "outcome.no4", "GET", "/ops/larx/targets", 200, 11290),
     ])
 
+def sc_east_berlin_origin():
+    """TREADSTONE (2019) — Becker pulls Bentley's declassified East Berlin origin file."""
+    ip, host = "195.62.13.45", "embassy-berlin-fw01.cia.gov"
+    return ("East Berlin — Becker pulls Bentley's Treadstone origin file", [
+        _duo_line("duo-authproxy01.cia.gov", "e.becker", "BLACKBRIAR", "East Berlin Archive Access", "10.0.1.10", "success", "user_approved"),
+        _http_line("blackbriar-db01.cia.gov", "10.0.1.10", "ellen.becker", "GET", "/intel/db/search?q=bentley+randolph", 200, 51204),
+        _db_line("ellen.becker", "public.cover_identities", "SELECT", "READ",
+                 "SELECT * FROM cover_identities WHERE alias='j.r.bentley'", 3),
+        _ssh_line(host, "Accepted publickey for randolph.bentley from "+ip+" port 49882 ssh2: RSA SHA256:"+_fake_sha256()),
+        _asa_line("langley-fw01.cia.gov", "ASA713228", "%ASA-6-713228: Group = TREADSTONE-VPN, Username = j.r.bentley, IP = "+ip+", AnyConnect clientless-VPN connection established. Clearance: TREADSTONE"),
+    ])
+
+def sc_mckenna_awakening():
+    """TREADSTONE (2019) — Doug McKenna's sleeper trigger fires in Tulsa, OK."""
+    ip, host = "173.245.10.88", "outpost-tulsa-ok.cia.gov"
+    return ("Tulsa, OK — Doug McKenna's Treadstone sleeper activation", [
+        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009107: IDS:9107 Treadstone Sleeper Activation Beacon from "+ip+" to 10.12.5.100 on interface outside [ASSET:ASSET-MCKENNA]", sev=2),
+        _duo_line("duo-authproxy02.cia.gov", "d.mckenna", "TREADSTONE", "Treadstone Sleeper Activation Portal", ip, "success", "user_approved"),
+        _win_line("OUTCOME-WS04", {"EventID": 4672, "Event": "Special privileges assigned to new logon",
+                  "SubjectUserName": "doug.mckenna", "PrivilegeList": "SeDebugPrivilege, SeTcbPrivilege"}),
+        _sudo_line(host, "doug.mckenna", "/opt/treadstone/bin/behavior_mod.py --subject doug.mckenna --session activation"),
+        _proxy_line(host, "10.12.5.100", "TCP_TUNNEL", 200, 14022, "CONNECT", "beacon.treadstone.example.net:443", "doug.mckenna", "HIER_DIRECT/"+ip, "-"),
+    ])
+
+def sc_seoul_pak_awakening():
+    """TREADSTONE (2019) — SoYun Pak's sleeper trigger fires near Seoul; Coleman/Edwards monitor."""
+    ip, host = "121.78.55.12", "station-seoul-01.cia.gov"
+    return ("Seoul — SoYun Pak's Treadstone sleeper activation", [
+        _dns_line(host, "10.11.5.100", "beacon.treadstone.example.net", "TXT", sev=4),
+        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009107: IDS:9107 Treadstone Sleeper Activation Beacon from "+ip+" to 10.11.5.100 on interface outside [ASSET:ASSET-PAK]", sev=2),
+        _duo_line("duo-authproxy01.cia.gov", "t.coleman", "BLACKBRIAR", "Treadstone Sleeper Activation Portal", "10.0.1.10", "success", "user_approved"),
+        _http_line(host, "10.11.5.100", "matt.edwards", "GET", "/intel/db/search?q=pak+soyun", 200, 9021),
+        _ssh_line(host, "Accepted publickey for soyun.pak from "+ip+" port 51023 ssh2: RSA SHA256:"+_fake_sha256()),
+    ])
+
+def sc_petra_handler_betrayal():
+    """TREADSTONE (2019) — rogue handler Petra issues a kill order on an awakened asset."""
+    ip = "160.153.0.12"
+    return ("Petra — rogue handler issues a kill order on McKenna", [
+        _duo_line("duo-authproxy02.cia.gov", "p.hollander", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "fraud", "user_marked_fraud"),
+        _sudo_line("blackbriar-db01.cia.gov", "petra", "/opt/blackbriar/bin/authorize_kill.py --target doug.mckenna --asset ASSET-MCKENNA"),
+        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009100: IDS:9100 Blackbriar Kill-Order C2 Channel from "+ip+" to 10.12.5.100 on interface outside [ASSET:ASSET-MCKENNA]", sev=2),
+        _ssh_line("outpost-tulsa-ok.cia.gov", "Failed password for invalid user petra from "+ip+" port 52341 ssh2", sev=4),
+    ])
+
 SCENARIOS: list[Callable[[], tuple]] = [
     sc_zurich_bank, sc_paris_safehouse, sc_berlin_neski, sc_goa_kirill,
     sc_waterloo_ross, sc_madrid_daniels, sc_tangier_desh, sc_manila_outcome,
@@ -1383,6 +1454,8 @@ SCENARIOS: list[Callable[[], tuple]] = [
     sc_amsterdam_deaddrop, sc_vienna_rendezvous, sc_rome_extraction_blown,
     sc_copenhagen_sigint, sc_langley_insider_leak, sc_ny_treadstone_induction,
     sc_deepdream_cyberops, sc_larx_handoff,
+    sc_east_berlin_origin, sc_mckenna_awakening, sc_seoul_pak_awakening,
+    sc_petra_handler_betrayal,
 ]
 
 # ─── Generator registry ────────────────────────────────────────────────────────

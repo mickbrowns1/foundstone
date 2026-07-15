@@ -223,11 +223,11 @@ Scenario → detection it lights up:
 | `db_mass_extract` | A5 (mass read), **B4** (DB→proxy exfil) |
 | `lateral_langley` | **A6a** (spray), **A6b** (mimikatz) |
 | `goa_kirill` / `tangier_desh` / `zurich_bank` / `amsterdam_deaddrop` / `vienna_rendezvous` | **B3** (beacon+fraud), C-series |
-| `waterloo_ross` / `paris_safehouse` | **C1/C2** (kill-order C2, authorize-kill) |
+| `waterloo_ross` / `paris_safehouse` / `petra_handler_betrayal` | **C1/C2** (kill-order C2, authorize-kill) |
 | `berlin_neski` | **C3** (Neski files) |
 | `reykjavik_hack` / `vegas_dewey` / `deepdream_cyberops` | **C4** (Reykjavik/Deep Dream) |
 | (any with Duo logins across cities) | **B1** (impossible travel) — fire 2+ different-city scenarios |
-| `rome_extraction_blown` / `copenhagen_sigint` / `langley_insider_leak` / `ny_treadstone_induction` / `larx_handoff` | story color — no dedicated detection yet (same as `goa_kirill`/`athens_riots`) |
+| `rome_extraction_blown` / `copenhagen_sigint` / `langley_insider_leak` / `ny_treadstone_induction` / `larx_handoff` / `east_berlin_origin` / `mckenna_awakening` / `seoul_pak_awakening` | story color — no dedicated detection yet (same as `goa_kirill`/`athens_riots`) |
 
 Then run the detection over the last few minutes and confirm the hits.
 ```
