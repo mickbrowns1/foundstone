@@ -10,3 +10,47 @@ services:
       # Mount data/ so the SQLite DB and uploaded templates persist across rebuilds
       - ./data:/app/data
     restart: unless-stopped
+
+  # ── Treadstone log simulator (Jason Bourne universe synthetic logs) ──
+  # log-generator -> syslog-ng -> DataPipeline HEC -> SDL. See TREADSTONE_PIPELINE.md
+  # and TREADSTONE_DETECTIONS.md. Requires HEC_URL / HEC_TOKEN in .env.
+  syslog-ng:
+    build:
+      context: ./syslog-ng
+    container_name: treadstone-syslog-ng
+    restart: unless-stopped
+    ports:
+      - "514:514/udp"
+      - "601:601/tcp"
+    volumes:
+      - ./syslog-ng/syslog-ng.conf:/etc/syslog-ng/syslog-ng.conf:ro
+      - syslog-queue:/var/lib/syslog-ng
+    environment:
+      - HEC_URL=${HEC_URL}
+      - HEC_TOKEN=${HEC_TOKEN}
+      - HEC_INDEX=${HEC_INDEX:-treadstone}
+    networks:
+      - log-net
+    depends_on:
+      - log-generator
+
+  log-generator:
+    build:
+      context: ./log-generator
+    container_name: treadstone-log-generator
+    restart: unless-stopped
+    environment:
+      - SYSLOG_HOST=syslog-ng
+      - SYSLOG_PORT=601
+      - LOG_INTERVAL_MS=${LOG_INTERVAL_MS:-1500}
+      - LOG_BURST=${LOG_BURST:-5}
+      - SCENARIO_CHANCE=${SCENARIO_CHANCE:-0.02}
+    networks:
+      - log-net
+
+volumes:
+  syslog-queue:
+
+networks:
+  log-net:
+    driver: bridge

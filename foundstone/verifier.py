@@ -91,10 +91,10 @@ def query_alerts(
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - lookback_seconds * 1000
 
-    url = f"{cfg.sdl_base_url}/api/query"
+    url = f"{cfg.sdl_base_url}/api/powerQuery"
     payload: dict[str, Any] = {
         "token": cfg.sdl_read_token,
-        "queryType": "pq",
+        "queryType": "complex",
         "query": _ALERT_QUERY_TEMPLATE,
         "startTime": start_ms,
         "endTime": now_ms,
@@ -109,7 +109,7 @@ def query_alerts(
         log.error("Alert query failed: %s", exc)
         return False, 0
 
-    rows: list[dict[str, Any]] = data.get("matches") or data.get("events") or []
+    rows = _rows_from_powerquery(data)
 
     canonical_name = _normalise_rule_name(rule_name)
     total_count = 0
@@ -146,10 +146,10 @@ def get_alert_counts(
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - lookback_seconds * 1000
 
-    url = f"{cfg.sdl_base_url}/api/query"
+    url = f"{cfg.sdl_base_url}/api/powerQuery"
     payload: dict[str, Any] = {
         "token": cfg.sdl_read_token,
-        "queryType": "pq",
+        "queryType": "complex",
         "query": _ALERT_QUERY_TEMPLATE,
         "startTime": start_ms,
         "endTime": now_ms,
@@ -164,7 +164,7 @@ def get_alert_counts(
         log.error("Alert count query failed: %s", exc)
         return {}
 
-    rows = data.get("matches") or data.get("events") or []
+    rows = _rows_from_powerquery(data)
     result: dict[str, int] = {}
     for row in rows:
         title = str(row.get("finding_info.title") or row.get("title") or "")
@@ -184,3 +184,12 @@ def get_alert_counts(
 def _normalise_rule_name(name: str) -> str:
     """Lower-case and strip the `` - OOTB`` suffix that S1 appends."""
     return name.lower().removesuffix(" - ootb").strip()
+
+
+def _rows_from_powerquery(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """
+    Convert a ``/api/powerQuery`` response (``{"columns": [...], "values": [...]}``)
+    into a list of ``{column_name: value}`` row dicts.
+    """
+    columns = [c.get("name") for c in data.get("columns", [])]
+    return [dict(zip(columns, row)) for row in data.get("values", [])]

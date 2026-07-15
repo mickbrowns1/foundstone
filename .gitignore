@@ -1,5 +1,6 @@
 # Secrets and sensitive data
 .env
+config.txt
 data/detections.json
 
 # Python
