@@ -26,7 +26,7 @@ A minimal HEC envelope per event (see [`syslog-ng/syslog-ng.conf`](syslog-ng/sys
 ```
 
 `event` is the raw log line — **plain text** for most sources, a **JSON string**
-for the JSON sources (Duo / Abnormal email / Windows).
+for the JSON sources (Duo, Mimecast, Windows, CloudTrail, Zscaler, Palo Alto).
 
 ## How DataPipeline reshapes it (verified on the wire)
 
@@ -38,8 +38,8 @@ for the JSON sources (Duo / Abnormal email / Windows).
 
 | `msgid` | source | `message` is |
 |---|---|---|
-| `DUO`, `EMAIL`, `WINEVENT`, `CLOUDTRAIL`, `PROXY` | Cisco Duo, Mimecast, Windows Security, AWS CloudTrail, Zscaler Internet Access | **JSON** |
-| `ASA302013`/`…`/`ASA400`, `SSHD`, `SUDO`, `PAM`, `HTTP`, `CRON`, `AUDIT`, `DNS`, `DBAUDIT` | everything else | **plain text** |
+| `DUO`, `EMAIL`, `WINEVENT`, `CLOUDTRAIL`, `PROXY`, `PANW` | Cisco Duo, Mimecast, Windows Security, AWS CloudTrail, Zscaler Internet Access, Palo Alto Networks Firewall | **JSON** |
+| `SSHD`, `SUDO`, `PAM`, `HTTP`, `CRON`, `AUDIT`, `DNS`, `DBAUDIT` | everything else | **plain text** |
 
 ## Pipeline requirements (DataPipeline side)
 
@@ -50,10 +50,10 @@ SDL (and the message-based detections stop working). Keep `message` for every so
 ### 2. Gate parse-json — don't run it on text sources
 A parse-json applied to the whole feed throws
 `unable to parse json: expected value at line 1 column 1` on every text source
-(their `message` starts with `%ASA-…`, `client @…`, etc., not `{`). Run it **only** on JSON:
+(their `message` starts with `client @…`, `Accepted publickey…`, etc., not `{`). Run it **only** on JSON:
 
 ```
-parse_json(message)  WHEN  msgid in ('DUO','EMAIL','WINEVENT','CLOUDTRAIL','PROXY')
+parse_json(message)  WHEN  msgid in ('DUO','EMAIL','WINEVENT','CLOUDTRAIL','PROXY','PANW')
 # or, source-agnostic (auto-handles future JSON sources):
 parse_json(message)  WHEN  message starts_with '{'
 ```
@@ -98,11 +98,11 @@ directly in the Python event builder, since it bypasses this Lua stage
 
 | `msgid` | `dataSource.name` | Real rule match? |
 |---|---|---|
-| `S1EDR` | `SentinelOne` | Yes (973 rules) |
-| `CLOUDTRAIL` | `CloudTrail` | Yes (435 rules) |
-| `WINEVENT` | `Windows Event Logs` | Yes (59 rules) |
-| `DUO` | `Cisco Duo` | Yes (24 rules) |
-| `ASA*` | `Cisco Firewall Threat Defense` | Yes (26 rules) -- name matches; log *format* is classic ASA syslog, not real FTD's |
+| `S1EDR` | `SentinelOne` | Yes (973 rules) -- name and field shape both match |
+| `CLOUDTRAIL` | `CloudTrail` | Yes (435 rules) -- name and field shape both match |
+| `WINEVENT` | `Windows Event Logs` | Yes (59 rules) -- name and field shape both match (nested `winEventLog.*`) |
+| `DUO` | `Cisco Duo` | Yes (24 rules) -- name and field shape both match (`status`/`status_detail`/`unmapped.*`) |
+| `PANW` | `Palo Alto Networks Firewall` | Yes (16 rules) -- name and field shape both match (`metadata.log_name`, `unmapped.*`) |
 | `PROXY` | `Zscaler Internet Access` | Yes (49 rules) -- name and field shape both match |
 | `EMAIL` | `Mimecast` | Yes (15 rules) -- name and field shape both match |
 | `SSHD`, `SUDO`, `PAM`, `CRON`, `AUDIT` | `Linux Audit` | No real match in this tenant's library -- invented |
@@ -110,12 +110,54 @@ directly in the Python event builder, since it bypasses this Lua stage
 | `DNS` | `ISC BIND` | No real match -- invented |
 | `DBAUDIT` | `PostgreSQL` | No real match -- invented |
 
+`PANW` replaced the earlier `ASA*`-prefixed Cisco ASA/FTD text events: this
+tenant's real 26 Cisco Firewall Threat Defense rules turned out to expect
+Cisco's actual FTD "Security Event" schema (`event.type` in `Intrusion
+event`/`File events`/`Open`, `unmapped.SID`/`ApplicationProtocol`/`FileType`/...)
+-- not classic `%ASA-6-302013` syslog text, which none of those rules could
+ever match. Palo Alto Networks Firewall was substituted instead (16 real
+deployed rules, well-documented public PAN-OS syslog field reference).
+
+## Text-source field extraction (pipeline-side parsing)
+
+The 8 plain-text sources (`SSHD`, `SUDO`, `PAM`, `HTTP`, `CRON`, `AUDIT`,
+`DNS`, `DBAUDIT`) used to require a PowerQuery `parse '...' from message`
+clause in every detection that needed a structured field out of them (see
+A2/A3/A5's history in `TREADSTONE_DETECTIONS.md`) -- fine for a one-off hunt,
+but it means re-deriving the same parse logic in every query, and paying that
+parse cost on every query execution instead of once at ingest.
+
+`parse_json_by_msgid.lua` now parses these too, right alongside its existing
+JSON-decode path: each text `msgid` has a dedicated Lua pattern-match function
+(`parseSSHD`, `parseSUDO`, `parsePAM`, `parseHTTP`, `parseCRON`, `parseAUDIT`,
+`parseDNS`, `parseDBAUDIT`) that extracts the fields generate_logs.py actually
+emits and attaches them as a **namespaced field table** on the event --
+`dns.qname`, `dbaudit.rows`, `sshd.sourceIp`, etc. -- rather than merging at
+root (avoids collision risk and keeps each source's fields visually grouped).
+`message` is left intact either way, so raw-text fallback queries (and any
+in-flight hunts using the old `parse` style) still work.
+
+If a message doesn't match its parser's expected pattern, the parser returns
+nil and the event just doesn't get that field table -- no crash, no dropped
+event, same posture as a JSON decode failure.
+
+| `msgid` | Namespaced fields | Real format modeled |
+|---|---|---|
+| `SSHD` | `sshd.result`, `.method`, `.user`, `.sourceIp`, `.port`, `.invalidUser` | genuine OpenSSH auth log |
+| `SUDO` | `sudo.user`, `.tty`, `.pwd`, `.runAsUser`, `.command` | genuine sudo log |
+| `PAM` | `pam.service`, `.action`, `.user` | genuine PAM session log |
+| `HTTP` | `http.clientIp`, `.user`, `.method`, `.path`, `.status`, `.bytes`, `.userAgent` | genuine Apache Combined Log Format |
+| `CRON` | `cron.user`, `.command` | genuine cron syslog line |
+| `AUDIT` | `audit.srcIp`, `.dstIp`, `.proto`, `.srcPort`, `.dstPort` | UFW/netfilter kernel log (not true auditd -- see the `Linux Audit` naming note above) |
+| `DNS` | `dns.clientIp`, `.qname`, `.qtype`, `.resolver`, `.port` | genuine ISC BIND querylog |
+| `DBAUDIT` | `dbaudit.user`, `.db`, `.class`, `.command`, `.table`, `.statement`, `.rows`, `.sessionId` | genuine pgAudit log line |
+
 ## Identity correlation
 
 For cross-source identity joins (e.g. phish → suspicious auth), the canonical identity is
-`<name>@cia.gov`: Duo `email`, Mimecast `email.to`, and Windows `TargetUserName`
-all align on it. Duo's `user.name` retains the **cover identity** (alias) for flavor —
-don't join on it.
+`<name>@cia.gov`: Duo `email`, Mimecast `email.to`, and Windows
+`winEventLog.data.event.eventData.targetUserName` all align on it. Duo's `user.name`
+retains the **cover identity** (alias) for flavor — don't join on it.
 
 ## SentinelOne EDR: direct-to-SDL, not DataPipeline
 
@@ -145,5 +187,5 @@ collision rules above don't apply to EDR — whatever key names appear in
 
 ## See also
 
-- [`DETECTIONS.md`](DETECTIONS.md) — PowerQuery detections, scoped by `msgid`.
+- [`TREADSTONE_DETECTIONS.md`](TREADSTONE_DETECTIONS.md) — PowerQuery detections, scoped by `msgid`.
 - [`syslog-ng/syslog-ng.conf`](syslog-ng/syslog-ng.conf) — the forwarder config (sourcetype mapping, HEC destination). Not used by `S1EDR`.

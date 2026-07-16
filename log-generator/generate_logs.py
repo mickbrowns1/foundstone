@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
 Treadstone Log Simulator
-Generates realistic Cisco ASA firewall + Linux auth logs populated with
-data from the Jason Bourne universe, and ships them to syslog-ng via TCP.
+Generates realistic Palo Alto Networks firewall + Linux auth logs populated
+with data from the Jason Bourne universe, and ships them to syslog-ng via TCP.
 
 Log formats modeled after:
-  - Cisco ASA syslog: https://www.cisco.com/c/en/us/td/docs/security/asa/syslog/b_syslog.html
+  - Palo Alto Networks PAN-OS Traffic/Threat/Config/GlobalProtect logs:
+      https://docs.paloaltonetworks.com/pan-os/11-1/pan-os-admin/monitoring/use-syslog-for-monitoring/syslog-field-descriptions
   - Linux PAM/sshd: standard RFC 3164 / RFC 5424
   - Apache Combined Log Format: https://httpd.apache.org/docs/current/logs.html
-  - Cisco Duo Authentication Logs (Admin API v2):
+  - Cisco Duo Authentication + Administrator Logs (Admin API v2):
       https://duo.com/docs/adminapi#authentication-logs
+
+Field names for Palo Alto, Windows Event Logs, and Cisco Duo are grounded in
+this tenant's own deployed rules (data/extracted.json) rather than the raw
+vendor wire format -- see the comments above _panw_event/_win_line/_duo_line.
 """
 
 import os
@@ -264,6 +269,26 @@ DUO_PROXIES = [
     "duo-authproxy02.cia.gov",
 ]
 
+# Duo Administrator log events (a second, real Duo log type this tenant's
+# rules also reference via unmapped.eventtype=administrator -- distinct from
+# the authentication events above). (action, description, severity) grounded
+# in this tenant's own deployed Duo rules.
+DUO_ADMIN_ACTIONS = [
+    ("admin_login_error", "Invalid password attempt", 4),
+    ("integration_skey_view", "Integration secret key viewed", 6),
+    ("admin_send_reset_password_email", "Password reset email sent", 6),
+    ("policy_delete", "MFA policy deleted", 5),
+    ("group_create", "Group configuration created", 6),
+    ("hardtoken_create", "Hardware token assigned to user", 6),
+    ("bypass_create", "Bypass code created by administrator", 5),
+    ("admin_single_sign_on_cert_update", "SSO certificate updated", 6),
+    ("ldap_directory_conn_create", "LDAP directory connection created", 6),
+    ("user_restore", "User account restored", 6),
+]
+# Plausible Duo administrators -- BLACKBRIAR/TREADSTONE-cleared operatives
+# with legitimate admin-console access.
+DUO_ADMINS = ["noah.vosen", "pamela.landy", "ezra.kramer", "albert.hirsch"]
+
 # Squid web-proxy hosts (outbound egress gateways)
 WEB_PROXIES = [
     "web-proxy01.cia.gov",
@@ -458,32 +483,47 @@ SENSITIVE_PORTS = {
     2222: "SSH-ALT",
 }
 
-ASA_FIREWALLS = [
-    {"host": "langley-fw01.cia.gov",        "ip": "10.0.0.1",   "fw_id": "FW-LGY-01"},
-    {"host": "embassy-zurich-fw01.cia.gov", "ip": "10.1.0.1",   "fw_id": "FW-ZRH-01"},
-    {"host": "embassy-berlin-fw01.cia.gov", "ip": "10.2.0.1",   "fw_id": "FW-BER-01"},
-    {"host": "embassy-madrid-fw01.cia.gov", "ip": "10.3.0.1",   "fw_id": "FW-MAD-01"},
-    {"host": "embassy-athens-fw01.cia.gov", "ip": "10.4.0.1",   "fw_id": "FW-ATH-01"},
-    {"host": "station-vegas-01.cia.gov",    "ip": "10.5.0.1",   "fw_id": "FW-LAS-01"},
-    {"host": "ops-dmz-gw01.cia.gov",        "ip": "172.16.0.1", "fw_id": "FW-DMZ-01"},
-    {"host": "noc-ids01.cia.gov",           "ip": "10.0.10.5",  "fw_id": "IDS-NOC-01"},
-    {"host": "station-rome-01.cia.gov",       "ip": "10.6.0.1", "fw_id": "FW-ROM-01"},
-    {"host": "station-vienna-01.cia.gov",     "ip": "10.7.0.1", "fw_id": "FW-VIE-01"},
-    {"host": "station-copenhagen-01.cia.gov", "ip": "10.8.0.1", "fw_id": "FW-CPH-01"},
-    {"host": "station-newdelhi-01.cia.gov",   "ip": "10.9.0.1", "fw_id": "FW-DEL-01"},
-    {"host": "station-hamburg-01.cia.gov",    "ip": "10.10.0.1", "fw_id": "FW-HAM-01"},
-    {"host": "station-seoul-01.cia.gov",      "ip": "10.11.0.1", "fw_id": "FW-SEL-01"},
-    {"host": "outpost-tulsa-ok.cia.gov",      "ip": "10.12.0.1", "fw_id": "FW-TUL-01"},
+PANW_FIREWALLS = [
+    {"host": "langley-fw01.cia.gov",        "ip": "10.0.0.1"},
+    {"host": "embassy-zurich-fw01.cia.gov", "ip": "10.1.0.1"},
+    {"host": "embassy-berlin-fw01.cia.gov", "ip": "10.2.0.1"},
+    {"host": "embassy-madrid-fw01.cia.gov", "ip": "10.3.0.1"},
+    {"host": "embassy-athens-fw01.cia.gov", "ip": "10.4.0.1"},
+    {"host": "station-vegas-01.cia.gov",    "ip": "10.5.0.1"},
+    {"host": "ops-dmz-gw01.cia.gov",        "ip": "172.16.0.1"},
+    {"host": "noc-ids01.cia.gov",           "ip": "10.0.10.5"},
+    {"host": "station-rome-01.cia.gov",       "ip": "10.6.0.1"},
+    {"host": "station-vienna-01.cia.gov",     "ip": "10.7.0.1"},
+    {"host": "station-copenhagen-01.cia.gov", "ip": "10.8.0.1"},
+    {"host": "station-newdelhi-01.cia.gov",   "ip": "10.9.0.1"},
+    {"host": "station-hamburg-01.cia.gov",    "ip": "10.10.0.1"},
+    {"host": "station-seoul-01.cia.gov",      "ip": "10.11.0.1"},
+    {"host": "outpost-tulsa-ok.cia.gov",      "ip": "10.12.0.1"},
 ]
 
-# Asset codenames + the on-screen assassins they map to
-BLACKBRIAR_ASSETS = [
-    "ASSET-ROMEO",  "ASSET-FOXTROT", "ASSET-TANGO",
-    "ASSET-ZULU",   "ASSET-SIERRA",  "ASSET-NOVEMBER",
-    "ASSET-DESH",   "ASSET-PAZ",     "ASSET-PROFESSOR",
-    "ASSET-CASTEL", "ASSET-JARDA",   "ASSET-KIRILL",
-    "ASSET-IRONHAND", "ASSET-VIENNA", "ASSET-AMSTERDAM",
-    "ASSET-DELHI", "ASSET-MCKENNA", "ASSET-PAK", "ASSET-BENTLEY",
+# App-ID names for ordinary ambient traffic (PAN-OS's real "app" field).
+PANW_APPS_BENIGN = ["ssl", "web-browsing", "dns", "ms-office365", "google-base", "ssh", "ntp"]
+
+# Named Bourne-universe Threat-log signatures used inside scripted scenarios
+# (sub_type=vulnerability is PAN-OS's real Threat-log subtype for a custom/
+# fictional IPS signature hit -- see _panw_event).
+PANW_NARRATIVE_SIGNATURES = {
+    "beacon":            "Treadstone Asset Beacon Detected",
+    "c2":                "Blackbriar Kill-Order C2 Channel",
+    "reykjavik":         "Reykjavik Mainframe Breach Signature",
+    "deepdream":         "Deep Dream Backdoor Callback",
+    "neski":             "Neski Files Exfiltration Attempt",
+    "insider":           "Insider Exfil Pattern - Kublinski Signature",
+    "sleeper":           "Treadstone Sleeper Activation Beacon",
+}
+
+# Generic (non-narrative) threat names for ordinary ambient Threat-log hits --
+# these are properly caught/blocked, same secure-by-default philosophy as
+# every other source (see the AWS CloudTrail / SentinelOne EDR comments above).
+PANW_AMBIENT_THREATS = [
+    ("virus", "malware", "Generic.Trojan.Agent", "high"),
+    ("url", "malware", None, "medium"),
+    ("vulnerability", None, "Suspicious Port Scan Activity", "medium"),
 ]
 
 HTTP_PATHS = [
@@ -550,107 +590,148 @@ def rfc5424(severity: int, facility: int, hostname: str, appname: str,
 
 # ─── Log generators ────────────────────────────────────────────────────────────
 
-def gen_asa_connection_built() -> str:
-    """Cisco ASA %ASA-6-302013: Built TCP connection."""
-    fw   = random.choice(ASA_FIREWALLS)
-    src  = random.choice(EXTERNAL_IPS + INTERNAL_IPS)
-    dst  = random.choice(INTERNAL_IPS)
-    port_num, svc = random.choice(list(SENSITIVE_PORTS.items()))
-    conn_id = random.randint(100000, 999999)
-    src_port = random.randint(49152, 65535)
-    msg = (
-        f"%ASA-6-302013: Built inbound TCP connection {conn_id} "
-        f"for outside:{src}/{src_port} ({src}/{src_port}) "
-        f"to inside:{dst}/{port_num} ({dst}/{port_num}) [{svc}]"
-    )
-    return rfc5424(6, 23, fw["host"], "ASA", str(random.randint(1000,9999)), "ASA302013", msg)
+def _panw_event(log_type: str, *, src_ip: str = None, dst_ip: str = None, dst_port: int = None,
+                 app: str = None, action: str = None, user: str = None, rule: str = None,
+                 sub_type: str = None, threat_name: str = None, threat_category: str = None,
+                 url_category: str = None, severity: str = None,
+                 config_result: str = None, admin: str = None, cmd: str = None, path: str = None,
+                 stage: str = None, status: str = None, region: str = None,
+                 bytes_sent: int = None, bytes_received: int = None) -> dict:
+    """Build a Palo Alto Networks Firewall (PAN-OS) event. Field names grounded
+    in this tenant's own 16 deployed Palo Alto-sourced rules (data/extracted.json):
+    metadata.log_name (TRAFFIC/THREAT), activity_name=GLOBALPROTECT, app_name,
+    action + unmapped.action, unmapped.sub_type (virus/url/vulnerability),
+    unmapped.threat_category/url_category, unmapped.severity, dst_endpoint.ip/port,
+    src_endpoint.ip/location.region, unmapped.type=CONFIG/unmapped.result. This
+    replaces the earlier Cisco ASA/FTD-shaped events, whose text format didn't
+    match any of this tenant's real Cisco FTD rules at all."""
+    now = datetime.now(timezone.utc)
+    event: dict = {"time_generated": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
-def gen_asa_connection_teardown() -> str:
-    """Cisco ASA %ASA-6-302014: Teardown TCP connection."""
-    fw   = random.choice(ASA_FIREWALLS)
-    src  = random.choice(EXTERNAL_IPS)
-    dst  = random.choice(INTERNAL_IPS)
-    port_num, svc = random.choice(list(SENSITIVE_PORTS.items()))
-    conn_id = random.randint(100000, 999999)
-    duration = f"{random.randint(0,3)}:{random.randint(0,59):02d}:{random.randint(1,59):02d}"
-    bytes_in = random.randint(512, 2_000_000)
-    bytes_out = random.randint(256, 500_000)
-    msg = (
-        f"%ASA-6-302014: Teardown TCP connection {conn_id} "
-        f"for outside:{src}/{random.randint(49152,65535)} to inside:{dst}/{port_num} "
-        f"duration {duration} bytes {bytes_in} reason TCP FIN [{svc}]"
-    )
-    return rfc5424(6, 23, fw["host"], "ASA", str(random.randint(1000,9999)), "ASA302014", msg)
+    if log_type == "GLOBALPROTECT":
+        event["activity_name"] = "GLOBALPROTECT"
+        event["unmapped"] = {"stage": stage or "login"}
+        event["status"] = status or "success"
+        if user: event["user"] = {"name": user}
+        if src_ip or region:
+            event["src_endpoint"] = {}
+            if src_ip: event["src_endpoint"]["ip"] = src_ip
+            if region: event["src_endpoint"]["location"] = {"region": region}
+        return event
 
-def gen_asa_deny() -> str:
-    """Cisco ASA %ASA-4-106023: Deny ACL rule."""
-    fw   = random.choice(ASA_FIREWALLS)
-    src  = random.choice(EXTERNAL_IPS)
-    dst  = random.choice(INTERNAL_IPS)
-    port_num, svc = random.choice(list(SENSITIVE_PORTS.items()))
-    acl  = random.choice(["ACL-OUTSIDE-IN", "ACL-DMZ-IN", "ACL-BLACKBRIAR-RESTRICTED"])
-    msg = (
-        f"%ASA-4-106023: Deny tcp src outside:{src}/{random.randint(49152,65535)} "
-        f"dst inside:{dst}/{port_num} by access-group \"{acl}\" [{svc}] [0x0, 0x0]"
-    )
-    return rfc5424(4, 23, fw["host"], "ASA", str(random.randint(1000,9999)), "ASA106023", msg)
+    if log_type == "CONFIG":
+        event["unmapped"] = {"type": "CONFIG", "result": config_result or "Succeeded"}
+        if admin: event["unmapped"]["admin"] = admin
+        if cmd: event["unmapped"]["cmd"] = cmd
+        if path: event["unmapped"]["path"] = path
+        return event
 
-def gen_asa_vpn_auth() -> str:
-    """Cisco ASA VPN authentication success/failure."""
-    fw      = random.choice(ASA_FIREWALLS)
-    op      = random.choice(OPERATIVES)
-    success = random.random() > 0.15
-    src     = random.choice(EXTERNAL_IPS)
-    if success:
-        msg_id = "ASA713228"
-        msg = (
-            f"%ASA-6-713228: Group = TREADSTONE-VPN, Username = {op['alias']}, "
-            f"IP = {src}, AnyConnect clientless-VPN connection established. "
-            f"Clearance: {op['clearance']}"
-        )
-        sev = 6
-    else:
-        msg_id = "ASA713198"
-        msg = (
-            f"%ASA-3-713198: Group = BLACKBRIAR-VPN, Username = {op['alias']}, "
-            f"IP = {src}, Session disconnected. Reason: Authentication failed. "
-            f"Duration: 0h:00m:03s"
-        )
-        sev = 3
-    return rfc5424(sev, 23, fw["host"], "ASA", str(random.randint(1000,9999)), msg_id, msg)
+    # TRAFFIC / THREAT share the connection-log shape.
+    event["metadata"] = {"log_name": log_type}
+    unmapped: dict = {}
+    if app: event["app_name"] = app
+    if action:
+        event["action"] = action
+        unmapped["action"] = action
+    if rule: unmapped["rule"] = rule
+    if src_ip or region:
+        event["src_endpoint"] = {}
+        if src_ip: event["src_endpoint"]["ip"] = src_ip
+        if region: event["src_endpoint"]["location"] = {"region": region}
+    if dst_ip or dst_port:
+        event["dst_endpoint"] = {}
+        if dst_ip: event["dst_endpoint"]["ip"] = dst_ip
+        if dst_port: event["dst_endpoint"]["port"] = dst_port
+    if user: event["user"] = {"name": user}
 
-def gen_asa_ids_alert() -> str:
-    """Cisco ASA IDS/IPS signature alert."""
-    fw   = random.choice(ASA_FIREWALLS)
-    src  = random.choice(EXTERNAL_IPS)
-    dst  = random.choice(INTERNAL_IPS)
-    sigs = [
-        ("4001",  "UDP Flood"),
-        ("5123",  "Possible SQL Injection"),
-        ("6005",  "ICMP Flood"),
-        ("3107",  "Port Scan Detected"),
-        ("9201",  "Brute Force SSH"),
-        ("11004", "DNS Amplification"),
-        ("2010",  "Shellcode Detected"),
-        ("8800",  "Data Exfiltration — Large Transfer"),
-        ("7001",  "Unauthorized Reconnaissance"),
-        ("9099",  "Treadstone Asset Beacon Detected"),
-        ("9100",  "Blackbriar Kill-Order C2 Channel"),
-        ("9101",  "Reykjavik Mainframe Breach Signature"),
-        ("9102",  "Deep Dream Backdoor Callback"),
-        ("9103",  "Neski Files Exfiltration Attempt"),
-        ("9104",  "Amsterdam Dead-Drop Signal Detected"),
-        ("9105",  "Vienna Rendezvous Beacon"),
-        ("9106",  "Insider Exfil Pattern — Kublinski Signature"),
-        ("9107",  "Treadstone Sleeper Activation Beacon"),
-    ]
-    sig_id, sig_name = random.choice(sigs)
-    asset = random.choice(BLACKBRIAR_ASSETS)
-    msg = (
-        f"%ASA-2-400{sig_id}: IDS:{sig_id} {sig_name} from {src} to {dst} "
-        f"on interface outside [ASSET:{asset}]"
-    )
-    return rfc5424(2, 23, fw["host"], "ASA", "ids", "ASA400", msg)
+    if log_type == "TRAFFIC":
+        if bytes_sent is not None or bytes_received is not None:
+            event["traffic"] = {"bytes_out": bytes_sent or 0, "bytes_in": bytes_received or 0}
+    elif log_type == "THREAT":
+        if sub_type: unmapped["sub_type"] = sub_type
+        if threat_category: unmapped["threat_category"] = threat_category
+        if url_category: unmapped["url_category"] = url_category
+        if severity: unmapped["severity"] = severity
+        if threat_name: event["threat"] = {"name": threat_name}
+
+    if unmapped:
+        event["unmapped"] = unmapped
+    return event
+
+def _panw_line(host: str, event: dict, sev: int = 6) -> str:
+    return rfc5424(sev, 23, host, "panw", str(random.randint(1000, 9999)), "PANW",
+                   json.dumps(event, separators=(",", ":")))
+
+def gen_panw_traffic() -> str:
+    """Ambient PAN-OS Traffic log -- ordinary allowed connections."""
+    fw  = random.choice(PANW_FIREWALLS)
+    op  = random.choice(OPERATIVES)
+    src = random.choice(EXTERNAL_IPS + INTERNAL_IPS)
+    dst = random.choice(INTERNAL_IPS)
+    port_num, _svc = random.choice(list(SENSITIVE_PORTS.items()))
+    event = _panw_event("TRAFFIC", src_ip=src, dst_ip=dst, dst_port=port_num,
+                         app=random.choice(PANW_APPS_BENIGN), action="allow",
+                         user=op["name"], rule="allow-outbound",
+                         bytes_sent=random.randint(256, 500_000),
+                         bytes_received=random.randint(512, 2_000_000))
+    return _panw_line(fw["host"], event)
+
+def gen_panw_deny() -> str:
+    """Ambient PAN-OS Traffic log -- policy denies, not a threat signature hit."""
+    fw  = random.choice(PANW_FIREWALLS)
+    src = random.choice(EXTERNAL_IPS)
+    dst = random.choice(INTERNAL_IPS)
+    port_num, _svc = random.choice(list(SENSITIVE_PORTS.items()))
+    event = _panw_event("TRAFFIC", src_ip=src, dst_ip=dst, dst_port=port_num,
+                         app=random.choice(PANW_APPS_BENIGN), action="deny",
+                         rule="deny-inbound")
+    return _panw_line(fw["host"], event, sev=4)
+
+def gen_panw_globalprotect() -> str:
+    """Ambient PAN-OS GlobalProtect VPN login -- always MFA'd, always succeeds."""
+    fw  = random.choice(PANW_FIREWALLS)
+    op  = random.choice(OPERATIVES)
+    src = random.choice(EXTERNAL_IPS)
+    geo = IP_GEO.get(src, {"country": "Unknown"})
+    event = _panw_event("GLOBALPROTECT", user=op["alias"], src_ip=src,
+                         stage="login", status="success", region=geo["country"])
+    return _panw_line(fw["host"], event)
+
+def gen_panw_threat() -> str:
+    """Ambient PAN-OS Threat log -- generic malware/vulnerability hits, always
+    caught (action=deny/reset/block). Named Bourne-universe signatures only
+    appear inside the dedicated scripted scenarios, not here."""
+    fw  = random.choice(PANW_FIREWALLS)
+    src = random.choice(EXTERNAL_IPS)
+    dst = random.choice(INTERNAL_IPS)
+    sub_type, category, name, severity = random.choice(PANW_AMBIENT_THREATS)
+    event = _panw_event("THREAT", src_ip=src, dst_ip=dst,
+                         app=random.choice(PANW_APPS_BENIGN),
+                         action=random.choice(["reset", "block", "drop"]),
+                         sub_type=sub_type,
+                         threat_category=category if sub_type == "virus" else None,
+                         url_category=category if sub_type == "url" else None,
+                         threat_name=name, severity=severity)
+    return _panw_line(fw["host"], event, sev=4)
+
+def _panw_ids_line(host: str, threat_name: str, src_ip: str, dst_ip: str, sev: int = 2) -> str:
+    """Scenario-only Threat log hit for a named Bourne-universe signature
+    (PAN-OS's real sub_type=vulnerability -- a custom/fictional IPS signature)."""
+    event = _panw_event("THREAT", src_ip=src_ip, dst_ip=dst_ip, action="allow",
+                         sub_type="vulnerability", threat_name=threat_name, severity="critical")
+    return _panw_line(host, event, sev=sev)
+
+def _panw_traffic_line(host: str, src_ip: str, dst_ip: str, dst_port: int, app: str,
+                        action: str = "allow", sev: int = 6) -> str:
+    event = _panw_event("TRAFFIC", src_ip=src_ip, dst_ip=dst_ip, dst_port=dst_port,
+                         app=app, action=action)
+    return _panw_line(host, event, sev=sev)
+
+def _panw_vpn_line(host: str, user: str, ip: str, sev: int = 6) -> str:
+    geo = IP_GEO.get(ip, {"country": "Unknown"})
+    event = _panw_event("GLOBALPROTECT", user=user, src_ip=ip, stage="login",
+                         status="success", region=geo["country"])
+    return _panw_line(host, event, sev=sev)
 
 def gen_ssh_auth() -> str:
     """Linux sshd auth log (PAM / OpenSSH format)."""
@@ -782,6 +863,8 @@ _DUO_OUTCOMES = (
     [("success", "user_approved",        "duo_push")] * 10 +
     [("success", "valid_passcode",       "passcode")] * 4 +
     [("success", "phone_call_approved",  "phone_call")] * 1 +
+    [("success", "anonymous_ip",         "duo_push")] * 1 +
+    [("success", "endpoint_is_not_trusted", "duo_push")] * 1 +
     [("denied",  "user_mistake",         "duo_push")] * 2 +
     [("denied",  "no_response",          "duo_push")] * 2 +
     [("denied",  "locked_out",           "duo_push")] * 1 +
@@ -792,10 +875,10 @@ _DUO_OUTCOMES = (
 )
 
 def gen_duo_auth() -> str:
-    """Cisco Duo authentication log (Admin API v2 'authentication' event).
-
-    Emitted as a JSON document — the standard shape a SIEM receives when Duo
-    logs are forwarded via the Duo Log Sync / Authentication Proxy over syslog.
+    """Cisco Duo authentication log. Field names grounded in this tenant's
+    real deployed Duo rules (status/status_detail/unmapped.event_type/
+    unmapped.factor -- NOT the raw Admin API v2 top-level event_type/factor/
+    reason/result shape used before, which none of those real rules matched).
     """
     proxy   = random.choice(DUO_PROXIES)
     op      = random.choice(OPERATIVES)
@@ -835,10 +918,9 @@ def gen_duo_auth() -> str:
             },
             "name": f"+1 555-{random.randint(100,999)}-{random.randint(1000,9999)}",
         },
-        "event_type":   "authentication",
-        "factor":       factor,
-        "reason":       reason,
-        "result":       result,
+        "status":        result,
+        "status_detail": reason,
+        "unmapped": {"event_type": "authentication", "factor": factor},
         # Duo's native epoch field is `timestamp`, but that collides with the
         # HEC envelope's reserved `timestamp` when DataPipeline root-merges the
         # parsed JSON (string-vs-int type conflict). Renamed to dodge the clash.
@@ -858,6 +940,23 @@ def gen_duo_auth() -> str:
 
     # Duo severity: fraud → alert(1), denied → warning(4), success → info(6)
     sev = {"fraud": 1, "denied": 4, "success": 6}[result]
+    return rfc5424(sev, 13, proxy, "duo", "-", "DUO", json.dumps(event, separators=(",", ":")))
+
+def gen_duo_admin() -> str:
+    """Cisco Duo Administrator log event -- ordinary admin-console housekeeping
+    (password resets, policy/group edits, hardware tokens). This is a distinct
+    real Duo log type (unmapped.eventtype=administrator) that was missing
+    entirely before; ambient actions here are routine, not suspicious."""
+    proxy = random.choice(DUO_PROXIES)
+    admin = random.choice(DUO_ADMINS)
+    action, description, sev = random.choice(DUO_ADMIN_ACTIONS)
+    now = datetime.now(timezone.utc)
+    event = {
+        "unmapped": {"eventtype": "administrator", "action": action, "description": description},
+        "user": {"name": admin},
+        "isotimestamp": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00",
+        "email": f"{admin}@cia.gov",
+    }
     return rfc5424(sev, 13, proxy, "duo", "-", "DUO", json.dumps(event, separators=(",", ":")))
 
 def gen_web_proxy() -> str:
@@ -1039,61 +1138,93 @@ def gen_db_audit() -> str:
     return rfc5424(sev, 16, "blackbriar-db01.cia.gov", "postgres", str(random.randint(1000,9999)),
                    "DBAUDIT", msg)
 
+# Maps the old flat PascalCase field names (still used as scenario call-site
+# kwargs, for readability) to this tenant's real deployed Windows Event Logs
+# rules' lowerCamelCase winEventLog.data.event.eventData.* field names.
+_WIN_FIELD_MAP = {
+    "LogonType": "logonType", "TargetUserName": "targetUserName",
+    "TargetDomainName": "targetDomainName", "IpAddress": "ipAddress",
+    "Status": "status", "SubStatus": "subStatus", "FailureReason": "failureReason",
+    "NewProcessName": "newProcessName", "CommandLine": "commandLine",
+    "ParentProcessName": "parentProcessName", "SubjectUserName": "subjectUserName",
+    "CallerComputerName": "callerComputerName", "PrivilegeList": "privilegeList",
+    "ServiceName": "serviceName", "TicketEncryptionType": "ticketEncryptionType",
+}
+
+def _win_event_json(comp: str, eid: int, description: str, event_data: dict) -> dict:
+    """Nest a Windows Security Event to match this tenant's own 59 deployed
+    Windows Event Logs rules: winEventLog.id/channel/description +
+    winEventLog.data.event.{system.eventID, eventData.<lowerCamelCase>} --
+    NOT the flat top-level EventID/TargetUserName shape used before, which
+    none of those real rules could ever match against."""
+    now = datetime.now(timezone.utc)
+    return {
+        "winEventLog": {
+            "channel": "Security",
+            "id": eid,
+            "providerName": "Microsoft-Windows-Security-Auditing",
+            "description": description,
+            "data": {"event": {
+                "system": {"eventID": eid,
+                           "provider": {"name": "Microsoft-Windows-Security-Auditing"}},
+                "eventData": event_data,
+            }},
+        },
+        "Computer": f"{comp}.CIA.LOCAL",
+        "TimeCreated": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+    }
+
 def gen_win_event() -> str:
-    """Windows Security Event log (Winlogbeat/NXLog-style JSON)."""
+    """Windows Security Event log, nested to match this tenant's real deployed
+    Windows Event Logs rules (see _win_event_json)."""
     comp = random.choice(WIN_HOSTS)
     op   = random.choice(OPERATIVES)
     eid  = random.choices([4624, 4625, 4768, 4769, 4688, 4740, 4672],
                           weights=[6, 4, 3, 3, 4, 1, 2])[0]
-    now  = datetime.now(timezone.utc)
-    base = {
-        "EventID":  eid,
-        "Channel":  "Security",
-        "Computer": f"{comp}.CIA.LOCAL",
-        "Provider": "Microsoft-Windows-Security-Auditing",
-        "TimeCreated": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-    }
     sev = 6
     if eid == 4624:
         lt = random.choice(list(WIN_LOGON_TYPES))
-        base.update({"Event": "An account was successfully logged on", "LogonType": lt,
-                     "LogonTypeName": WIN_LOGON_TYPES[lt], "TargetUserName": op["name"],
-                     "TargetDomainName": "CIA", "IpAddress": random.choice(EXTERNAL_IPS + INTERNAL_IPS)})
+        description = "An account was successfully logged on."
+        data = {"logonType": lt, "targetUserName": op["name"], "targetDomainName": "CIA",
+                "ipAddress": random.choice(EXTERNAL_IPS + INTERNAL_IPS)}
     elif eid == 4625:
         st, sub, reason = random.choice(WIN_FAIL_STATUS)
-        base.update({"Event": "An account failed to log on", "LogonType": 3,
-                     "TargetUserName": op["alias"], "TargetDomainName": "CIA",
-                     "Status": st, "SubStatus": sub, "FailureReason": reason,
-                     "IpAddress": random.choice(EXTERNAL_IPS)})
+        description = "An account failed to log on."
+        data = {"logonType": 3, "targetUserName": op["alias"], "targetDomainName": "CIA",
+                "status": st, "subStatus": sub, "failureReason": reason,
+                "ipAddress": random.choice(EXTERNAL_IPS)}
         sev = 4
     elif eid == 4768:
-        base.update({"Event": "A Kerberos authentication ticket (TGT) was requested",
-                     "TargetUserName": op["name"], "TargetDomainName": "CIA.LOCAL",
-                     "IpAddress": random.choice(INTERNAL_IPS)})
+        description = "A Kerberos authentication ticket (TGT) was requested."
+        data = {"targetUserName": op["name"], "targetDomainName": "CIA.LOCAL",
+                "serviceName": "krbtgt", "ticketEncryptionType": "0x12",
+                "ipAddress": random.choice(INTERNAL_IPS)}
     elif eid == 4769:
         enc = random.choice(["0x12", "0x12", "0x17"])  # 0x17 = RC4 → kerberoastable
-        base.update({"Event": "A Kerberos service ticket was requested",
-                     "TargetUserName": f"{op['name']}@CIA.LOCAL",
-                     "ServiceName": random.choice(["MSSQLSvc/blackbriar-db01", "HTTP/ironhand-ctrl01",
-                                                   "CIFS/langley-dc01"]),
-                     "TicketEncryptionType": enc, "IpAddress": random.choice(INTERNAL_IPS)})
+        description = "A Kerberos service ticket was requested."
+        data = {"targetUserName": f"{op['name']}@CIA.LOCAL",
+                "serviceName": random.choice(["MSSQLSvc/blackbriar-db01", "HTTP/ironhand-ctrl01",
+                                              "CIFS/langley-dc01"]),
+                "ticketEncryptionType": enc, "ipAddress": random.choice(INTERNAL_IPS)}
         if enc == "0x17":
             sev = 4
     elif eid == 4688:
         proc = random.choice(["powershell.exe -enc SQBFAFgA", "cmd.exe /c whoami /all",
                               "rundll32.exe", "mimikatz.exe", "net.exe group \"Domain Admins\""])
-        base.update({"Event": "A new process has been created", "NewProcessName": f"C:\\Windows\\System32\\{proc.split()[0]}",
-                     "CommandLine": proc, "ParentProcessName": "C:\\Windows\\explorer.exe",
-                     "SubjectUserName": op["name"]})
+        description = "A new process has been created."
+        data = {"newProcessName": f"C:\\Windows\\System32\\{proc.split()[0]}",
+                "commandLine": proc, "parentProcessName": "C:\\Windows\\explorer.exe",
+                "subjectUserName": op["name"]}
     elif eid == 4740:
-        base.update({"Event": "A user account was locked out", "TargetUserName": op["alias"],
-                     "CallerComputerName": random.choice(WIN_HOSTS)})
+        description = "A user account was locked out."
+        data = {"targetUserName": op["alias"], "callerComputerName": random.choice(WIN_HOSTS)}
         sev = 4
     else:  # 4672
-        base.update({"Event": "Special privileges assigned to new logon", "SubjectUserName": op["name"],
-                     "PrivilegeList": "SeDebugPrivilege, SeTcbPrivilege"})
+        description = "Special privileges assigned to new logon."
+        data = {"subjectUserName": op["name"], "privilegeList": "SeDebugPrivilege, SeTcbPrivilege"}
+    event = _win_event_json(comp, eid, description, data)
     return rfc5424(sev, 13, f"{comp.lower()}.cia.gov", "Security", "-", "WINEVENT",
-                   json.dumps(base, separators=(",", ":")))
+                   json.dumps(event, separators=(",", ":")))
 
 def _cloudtrail_event(op: dict, program: str, event_name: str, event_source: str,
                        request_params: dict | None = None, response_elements: dict | None = None,
@@ -1337,9 +1468,6 @@ def _fake_sha256() -> str:
 # share actors/hosts/IPs — so a SOC analyst can pivot host→user→IP and watch an
 # actual Bourne plot unfold across firewall, identity, proxy and host logs.
 
-def _asa_line(host: str, msgid: str, body: str, sev: int = 6) -> str:
-    return rfc5424(sev, 23, host, "ASA", str(random.randint(1000, 9999)), msgid, body)
-
 def _ssh_line(host: str, body: str, sev: int = 6) -> str:
     return rfc5424(sev, 4, host, "sshd", str(random.randint(10000, 65535)), "SSHD", body)
 
@@ -1405,6 +1533,9 @@ def _audit_line(host: str, src: str, dst: str, dpt: int) -> str:
 
 def _duo_line(proxy: str, alias: str, clearance: str, app: str, ip: str,
               result: str, reason: str, factor: str = "duo_push") -> str:
+    """Cisco Duo authentication event. Field names grounded in this tenant's
+    real deployed Duo rules (status/status_detail/unmapped.event_type/
+    unmapped.factor); see gen_duo_auth for the same shape's ambient version."""
     geo = IP_GEO.get(ip, {"city": "Unknown", "state": "Unknown", "country": "Unknown"})
     now = datetime.now(timezone.utc)
     txid = "-".join("".join(random.choices("0123456789abcdef", k=n)) for n in (8, 4, 4, 4, 12))
@@ -1423,10 +1554,9 @@ def _duo_line(proxy: str, alias: str, clearance: str, app: str, ip: str,
             "location": {"city": geo["city"], "state": geo["state"], "country": geo["country"]},
             "name": f"+1 555-{random.randint(100,999)}-{random.randint(1000,9999)}",
         },
-        "event_type": "authentication",
-        "factor": factor,
-        "reason": reason,
-        "result": result,
+        "status": result,
+        "status_detail": reason,
+        "unmapped": {"event_type": "authentication", "factor": factor},
         "auth_timestamp": int(now.timestamp()),   # renamed from `timestamp` to avoid envelope collision
         "isotimestamp": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00",
         "txid": txid,
@@ -1451,23 +1581,29 @@ def _db_line(user: str, obj: str, cmd: str, cls: str, stmt: str, rows: int) -> s
                    "DBAUDIT", msg)
 
 def _win_line(comp: str, fields: dict, sev: int = 6) -> str:
-    base = {"Channel": "Security", "Computer": f"{comp}.CIA.LOCAL",
-            "Provider": "Microsoft-Windows-Security-Auditing",
-            "TimeCreated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"}
-    base.update(fields)
+    """Scenario call sites still pass the old flat PascalCase fields dict
+    (EventID/Event/TargetUserName/...) for readability; this maps them into
+    the real nested winEventLog.* shape (see _win_event_json) so no scenario
+    call site needs to change."""
+    fields = dict(fields)
+    eid = fields.pop("EventID")
+    description = fields.pop("Event", "")
+    fields.pop("LogonTypeName", None)  # descriptive-only, not a real eventData field
+    event_data = {_WIN_FIELD_MAP[k]: v for k, v in fields.items() if k in _WIN_FIELD_MAP}
+    event = _win_event_json(comp, eid, description, event_data)
     return rfc5424(sev, 13, f"{comp.lower()}.cia.gov", "Security", "-", "WINEVENT",
-                   json.dumps(base, separators=(",", ":")))
+                   json.dumps(event, separators=(",", ":")))
 
 
 def sc_zurich_bank():
     """IDENTITY — Bourne surfaces in Zurich and opens Gemeinschaft box 0094."""
     ip, host = "82.145.67.201", "embassy-zurich-fw01.cia.gov"
     return ("Zurich — Gemeinschaft Bank box 0094 (Bourne resurfaces)", [
-        _asa_line(host, "ASA713228", "%ASA-6-713228: Group = TREADSTONE-VPN, Username = john.michael.kane, IP = "+ip+", AnyConnect connection established. Clearance: TREADSTONE"),
+        _panw_vpn_line(host, "john.michael.kane", ip),
         _duo_line("duo-authproxy01.cia.gov", "john.michael.kane", "TREADSTONE", "Gemeinschaft Bank Portal", ip, "success", "user_approved"),
         _http_line("blackbriar-db01.cia.gov", ip, "john.michael.kane", "GET", "/intel/db/passport?name=john+michael+kane", 200, 4096),
         _sudo_line("blackbriar-db01.cia.gov", "noah.vosen", "/usr/bin/grep -r 'John Michael Kane' /intel/db/passports/"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.0.1.10 on interface outside [ASSET:ASSET-ROMEO]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["beacon"], ip, "10.0.1.10"),
         _duo_line("duo-authproxy02.cia.gov", "john.michael.kane", "TREADSTONE", "Gemeinschaft Bank Portal", ip, "fraud", "user_marked_fraud"),
         _proxy_line("embassy-zurich-fw01.cia.gov", "10.1.0.50", "TCP_TUNNEL", 200, 81233, "CONNECT", "gemeinschaft-bank.example.net:443", "john.michael.kane", "HIER_DIRECT/"+ip, "-"),
     ])
@@ -1479,7 +1615,7 @@ def sc_paris_safehouse():
         _ssh_line(host, "Accepted publickey for alex.conklin from "+ip+" port 51022 ssh2: RSA SHA256:"+_fake_sha256()),
         _sudo_line(host, "alex.conklin", "/opt/blackbriar/bin/authorize_kill.py --target jason.bourne --asset ASSET-PROFESSOR"),
         _duo_line("duo-authproxy02.cia.gov", "m.kiluanyi", "TREADSTONE", "Treadstone Ops Portal", ip, "success", "user_approved"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009100: IDS:9100 Blackbriar Kill-Order C2 Channel from "+ip+" to 10.0.2.20 on interface outside [ASSET:ASSET-PROFESSOR]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["c2"], ip, "10.0.2.20"),
         _http_line("blackbriar-db01.cia.gov", ip, "alex.conklin", "POST", "/ops/rendition/request", 201, 812),
     ])
 
@@ -1489,7 +1625,7 @@ def sc_berlin_neski():
     return ("Berlin — the Neski files & Abbott's cover-up", [
         _http_line("blackbriar-db01.cia.gov", "10.2.0.1", "pamela.landy", "GET", "/intel/archive/neski-files-2003", 200, 220143),
         _proxy_line("embassy-berlin-fw01.cia.gov", "10.2.0.1", "TCP_MISS", 200, 5021544, "GET", "https://archive.example.org/neski-files-2003.tar.gz", "pamela.landy", "HIER_DIRECT/"+bln, "application/gzip"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009103: IDS:9103 Neski Files Exfiltration Attempt from "+bln+" to 10.2.5.100 on interface outside [ASSET:ASSET-KIRILL]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["neski"], bln, "10.2.5.100"),
         _sudo_line("blackbriar-db01.cia.gov", "ward.abbott", "/usr/bin/shred -u /intel/archive/neski-files-2003.tar.gz"),
         _duo_line("duo-authproxy01.cia.gov", "g.volkov", "HOSTILE", "BlackBriar VPN", msk, "fraud", "user_marked_fraud"),
         _ssh_line("blackbriar-db01.cia.gov", "Failed password for danny.zorn from "+bln+" port 44122 ssh2", sev=4),
@@ -1500,7 +1636,7 @@ def sc_goa_kirill():
     ip, host = "188.40.75.132", "safehouse-goa-01.cia.gov"
     return ("Goa — Kirill closes in (Marie)", [
         _duo_line("duo-authproxy02.cia.gov", "g.volkov", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "fraud", "user_marked_fraud"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.0.1.11 on interface outside [ASSET:ASSET-KIRILL]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["beacon"], ip, "10.0.1.11"),
         _ssh_line(host, "Accepted publickey for marie.kreutz from "+ip+" port 49888 ssh2: RSA SHA256:"+_fake_sha256()),
         _audit_line(host, ip, "10.2.5.100", 22),
         _proxy_line(host, "10.2.5.100", "TCP_TUNNEL", 200, 14233, "CONNECT", "www.bbc.co.uk:443", "marie.kreutz", "HIER_DIRECT/151.101.0.81", "-"),
@@ -1514,7 +1650,7 @@ def sc_waterloo_ross():
         _proxy_line("safe-london-proxy01.cia.gov", "10.2.5.100", "TCP_TUNNEL", 200, 2204411, "CONNECT", "securedrop.theguardian.example.net:443", "simon.ross", "HIER_DIRECT/"+ip, "-"),
         _duo_line("duo-authproxy01.cia.gov", "n.vosen", "BLACKBRIAR", "Iron Hand Targeting System", "203.0.113.77", "success", "user_approved"),
         _sudo_line("blackbriar-db01.cia.gov", "noah.vosen", "/opt/blackbriar/bin/authorize_kill.py --target simon.ross --asset ASSET-PAZ"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009100: IDS:9100 Blackbriar Kill-Order C2 Channel from "+ip+" to 10.0.2.21 on interface outside [ASSET:ASSET-PAZ]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["c2"], ip, "10.0.2.21"),
     ])
 
 def sc_madrid_daniels():
@@ -1525,7 +1661,7 @@ def sc_madrid_daniels():
         _ssh_line(host, "Accepted publickey for neal.daniels from "+ip+" port 50211 ssh2: RSA SHA256:"+_fake_sha256()),
         _http_line("blackbriar-db01.cia.gov", ip, "neal.daniels", "GET", "/api/v2/ops/blackbriar/status", 200, 18221),
         _sudo_line(host, "neal.daniels", "/opt/blackbriar/bin/burn_program.sh --op TREADSTONE --reason COMPROMISED"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.3.0.1 on interface outside [ASSET:ASSET-DESH]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["beacon"], ip, "10.3.0.1"),
     ])
 
 def sc_tangier_desh():
@@ -1534,7 +1670,7 @@ def sc_tangier_desh():
     return ("Tangier — Desh hunts Nicky Parsons", [
         _duo_line("duo-authproxy01.cia.gov", "sophie.reilly", "BLACKBRIAR", "Treadstone Ops Portal", ip, "success", "user_approved"),
         _duo_line("duo-authproxy01.cia.gov", "p.hassan", "BLACKBRIAR", "Asset Tracker (CLASSIFIED)", ip, "denied", "locked_out"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009100: IDS:9100 Blackbriar Kill-Order C2 Channel from "+ip+" to 10.0.1.10 on interface outside [ASSET:ASSET-DESH]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["c2"], ip, "10.0.1.10"),
         _ssh_line(host, "Accepted publickey for nicky.parsons from "+ip+" port 51990 ssh2: RSA SHA256:"+_fake_sha256()),
         _audit_line(host, ip, "10.2.5.100", 443),
     ])
@@ -1547,7 +1683,7 @@ def sc_manila_outcome():
         _http_line("outcome-proxy01.cia.gov", ip, "marta.shearing", "GET", "/ops/outcome/chem-protocol/green", 200, 9123),
         _sudo_line("larx-ctrl01.cia.gov", "eric.byer", "/opt/outcome/bin/viral_off.sh --subject 5 --chem green"),
         _ssh_line(host, "Accepted publickey for marta.shearing from "+ip+" port 49233 ssh2: RSA SHA256:"+_fake_sha256()),
-        _asa_line("ops-dmz-gw01.cia.gov", "ASA302013", "%ASA-6-302013: Built inbound TCP connection 774551 for outside:"+ip+"/52001 ("+ip+"/52001) to inside:10.2.5.100/443 (10.2.5.100/443) [HTTPS]"),
+        _panw_traffic_line("ops-dmz-gw01.cia.gov", ip, "10.2.5.100", 443, "ssl"),
     ])
 
 def sc_reykjavik_hack():
@@ -1556,7 +1692,7 @@ def sc_reykjavik_hack():
     return ("Reykjavik — CIA mainframe breach (Iron Hand exposed)", [
         _ssh_line("ironhand-ctrl01.cia.gov", "Failed password for heather.lee from "+ip+" port 53122 ssh2", sev=4),
         _ssh_line("ironhand-ctrl01.cia.gov", "Accepted publickey for heather.lee from "+ip+" port 53124 ssh2: RSA SHA256:"+_fake_sha256()),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009101: IDS:9101 Reykjavik Mainframe Breach Signature from "+ip+" to 10.0.1.10 on interface outside [ASSET:ASSET-IRONHAND]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["reykjavik"], ip, "10.0.1.10"),
         _http_line("ironhand-ctrl01.cia.gov", ip, "heather.lee", "GET", "/api/v2/ops/ironhand/targets", 200, 44211),
         _proxy_line(host, "10.0.1.10", "TCP_MISS", 200, 8412233, "POST", "https://mainframe-gw.cia.example.net/ironhand/dump", "heather.lee", "HIER_DIRECT/"+ip, "application/octet-stream"),
         _duo_line("duo-authproxy01.cia.gov", "h.lee", "IRON-HAND", "Iron Hand Targeting System", ip, "denied", "anomalous_push"),
@@ -1570,7 +1706,7 @@ def sc_vegas_dewey():
         _duo_line("duo-authproxy02.cia.gov", "a.kalloor", "DEEPDREAM", "Deep Dream Admin Portal", ip, "success", "user_approved"),
         _http_line("ironhand-ctrl01.cia.gov", ip, "robert.dewey", "GET", "/deepdream/admin/users/export", 200, 1882211, ua="DeepDreamBackdoor/0.9 (do-not-log)"),
         _proxy_line(host, "10.5.0.1", "TCP_MISS", 200, 3211044, "POST", "https://api.deepdream.example.com/v1/users/export", "robert.dewey", "HIER_DIRECT/"+ip, "application/json"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009102: IDS:9102 Deep Dream Backdoor Callback from "+ip+" to 10.5.0.1 on interface outside [ASSET:ASSET-IRONHAND]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["deepdream"], ip, "10.5.0.1"),
         _sudo_line("ironhand-ctrl01.cia.gov", "robert.dewey", "/opt/ironhand/bin/scrub_dewey_comms.sh --before 2016-07-01"),
     ])
 
@@ -1579,7 +1715,7 @@ def sc_athens_riots():
     ip, host = "62.169.34.77", "embassy-athens-fw01.cia.gov"
     return ("Athens — Syntagma riots (Nicky Parsons)", [
         _duo_line("duo-authproxy01.cia.gov", "sophie.reilly", "BLACKBRIAR", "Treadstone Ops Portal", ip, "success", "user_approved"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.4.0.1 on interface outside [ASSET:ASSET-IRONHAND]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["beacon"], ip, "10.4.0.1"),
         _duo_line("duo-authproxy01.cia.gov", "c.dassault", "IRON-HAND", "Iron Hand Targeting System", ip, "success", "user_approved"),
         _proxy_line(host, "10.4.0.1", "TCP_TUNNEL", 200, 92344, "CONNECT", "deaddrop-athens.example.net:443", "sophie.reilly", "HIER_DIRECT/"+ip, "-"),
         _audit_line(host, ip, "10.4.0.1", 443),
@@ -1607,10 +1743,8 @@ def sc_dns_beacon():
     """C2 — a Treadstone asset beacons home on a fixed cadence."""
     host, client, dom = "ops-dmz-gw01.cia.gov", "10.2.5.100", "c2.blackbriar.example.net"
     lines = [_dns_line(host, client, dom, "A", sev=4) for _ in range(3)]
-    lines.append(_asa_line("noc-ids01.cia.gov", "ASA400",
-        "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+client+" to 185.220.101.45 on interface outside [ASSET:ASSET-ROMEO]", sev=2))
-    lines.append(_asa_line("ops-dmz-gw01.cia.gov", "ASA302013",
-        "%ASA-6-302013: Built outbound TCP connection 552119 for inside:"+client+"/51002 to outside:185.220.101.45/443 (185.220.101.45/443) [HTTPS]"))
+    lines.append(_panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["beacon"], client, "185.220.101.45"))
+    lines.append(_panw_traffic_line("ops-dmz-gw01.cia.gov", client, "185.220.101.45", 443, "ssl"))
     return ("DNS beaconing — Blackbriar asset phones home (C2)", lines)
 
 def sc_dns_tunnel_exfil():
@@ -1628,8 +1762,7 @@ def sc_dns_tunnel_exfil():
     # blocked upload → fall back to DNS tunneling: many long TXT lookups
     lines += [_dns_line("langley-dc01.cia.gov", client, f"{_b32(20)}.{_b32(12)}.exfil.example.net", "TXT", sev=4)
               for _ in range(3)]
-    lines.append(_asa_line("noc-ids01.cia.gov", "ASA400",
-        "%ASA-2-4009103: IDS:9103 Neski Files Exfiltration Attempt from "+client+" to 10.0.0.53 on interface outside [ASSET:ASSET-KIRILL]", sev=2))
+    lines.append(_panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["neski"], client, "10.0.0.53"))
     return ("DNS tunneling — Neski files exfiltrated past the proxy", lines)
 
 def sc_kerberoast():
@@ -1688,7 +1821,7 @@ def sc_amsterdam_deaddrop():
     ip, host = "83.245.10.55", "safehouse-amsterdam-01.cia.gov"
     return ("Amsterdam — canal-district dead drop (Kirilenko)", [
         _dns_line(host, "10.6.5.100", "deaddrop-amsterdam.example.net", "A", sev=4),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.6.5.100 on interface outside [ASSET:ASSET-AMSTERDAM]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["beacon"], ip, "10.6.5.100"),
         _duo_line("duo-authproxy02.cia.gov", "o.kirilenko", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "fraud", "user_marked_fraud"),
         _ssh_line(host, "Accepted publickey for frank.meyer from "+ip+" port 50142 ssh2: RSA SHA256:"+_fake_sha256()),
         _proxy_line(host, "10.6.5.100", "TCP_TUNNEL", 200, 33221, "CONNECT", "deaddrop-amsterdam.example.net:443", "frank.meyer", "HIER_DIRECT/"+ip, "-"),
@@ -1700,7 +1833,7 @@ def sc_vienna_rendezvous():
     return ("Vienna — Szabo rendezvous under surveillance", [
         _duo_line("duo-authproxy01.cia.gov", "t.stack", "BLACKBRIAR", "Vienna Consulate VPN", ip, "success", "user_approved"),
         _http_line(host, ip, "tom.stack", "GET", "/intel/db/search?q=szabo+viktor", 200, 8811),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.7.5.100 on interface outside [ASSET:ASSET-VIENNA]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["beacon"], ip, "10.7.5.100"),
         _duo_line("duo-authproxy01.cia.gov", "v.szabo", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "fraud", "user_marked_fraud"),
         _ssh_line(host, "Failed password for invalid user v.szabo from "+ip+" port 50877 ssh2", sev=4),
     ])
@@ -1711,7 +1844,7 @@ def sc_rome_extraction_blown():
     lines = [_duo_line("duo-authproxy02.cia.gov", n, "BLACKBRIAR", "Embassy RDP Gateway", ip, "denied", "no_response")
              for n in ("s.okonkwo", "t.cronin")]
     lines += [
-        _asa_line(host, "ASA106023", "%ASA-4-106023: Deny tcp src outside:"+ip+"/51221 dst inside:10.6.0.1/443 by access-group \"ACL-BLACKBRIAR-RESTRICTED\" [HTTPS] [0x0, 0x0]", sev=4),
+        _panw_traffic_line(host, ip, "10.6.0.1", 443, "ssl", action="deny", sev=4),
         _sudo_line(host, "sarah.okonkwo", "/opt/blackbriar/bin/burn_program.sh --op ROME-EXTRACT --reason COMPROMISED"),
         _win_line("OUTCOME-WS04", {"EventID": 4740, "Event": "A user account was locked out",
                   "TargetUserName": "s.okonkwo", "CallerComputerName": "STATION-ROME-01"}, sev=4),
@@ -1743,7 +1876,7 @@ def sc_langley_insider_leak():
                     direction="outbound", event_type="TTP Impersonation Protection",
                     malicious=True, blocked=False)),
         _sudo_line("langley-annex02.cia.gov", "jack.kublinski", "/bin/cp /etc/shadow /tmp/.hidden_s"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009106: IDS:9106 Insider Exfil Pattern - Kublinski Signature from 10.0.0.1 to 172.16.0.1 on interface inside [ASSET:ASSET-JARDA]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["insider"], "10.0.0.1", "172.16.0.1"),
     ])
 
 def sc_ny_treadstone_induction():
@@ -1756,7 +1889,7 @@ def sc_ny_treadstone_induction():
         _duo_line("duo-authproxy02.cia.gov", "a.hirsch", "TREADSTONE", "Treadstone Behavioral-Mod Console", "10.0.1.11", "success", "user_approved"),
         _sudo_line(host, "albert.hirsch", "/opt/treadstone/bin/behavior_mod.py --subject david.webb --session induction"),
         _http_line(host, "10.0.1.11", "albert.hirsch", "POST", "/comsec/keygen", 201, 2044),
-        _asa_line("langley-fw01.cia.gov", "ASA713228", "%ASA-6-713228: Group = TREADSTONE-VPN, Username = a.hirsch, IP = 10.0.1.11, AnyConnect clientless-VPN connection established. Clearance: TREADSTONE"),
+        _panw_vpn_line("langley-fw01.cia.gov", "a.hirsch", "10.0.1.11"),
     ])
 
 def sc_deepdream_cyberops():
@@ -1775,7 +1908,7 @@ def sc_larx_handoff():
     return ("New Delhi — Outcome/LARX field-comms handoff", [
         _duo_line("duo-authproxy02.cia.gov", "number.four", "OUTCOME", "LARX Field Comms", ip, "success", "valid_passcode", factor="passcode"),
         _ssh_line(host, "Accepted publickey for outcome.no5 from "+ip+" port 49221 ssh2: RSA SHA256:"+_fake_sha256()),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009099: IDS:9099 Treadstone Asset Beacon Detected from "+ip+" to 10.9.5.100 on interface outside [ASSET:ASSET-DELHI]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["beacon"], ip, "10.9.5.100"),
         _sudo_line("larx-ctrl01.cia.gov", "mark.turso", "/bin/bash /opt/larx/rotate_creds.sh"),
         _http_line(host, ip, "outcome.no4", "GET", "/ops/larx/targets", 200, 11290),
     ])
@@ -1789,14 +1922,14 @@ def sc_east_berlin_origin():
         _db_line("ellen.becker", "public.cover_identities", "SELECT", "READ",
                  "SELECT * FROM cover_identities WHERE alias='j.r.bentley'", 3),
         _ssh_line(host, "Accepted publickey for randolph.bentley from "+ip+" port 49882 ssh2: RSA SHA256:"+_fake_sha256()),
-        _asa_line("langley-fw01.cia.gov", "ASA713228", "%ASA-6-713228: Group = TREADSTONE-VPN, Username = j.r.bentley, IP = "+ip+", AnyConnect clientless-VPN connection established. Clearance: TREADSTONE"),
+        _panw_vpn_line("langley-fw01.cia.gov", "j.r.bentley", ip),
     ])
 
 def sc_mckenna_awakening():
     """TREADSTONE (2019) — Doug McKenna's sleeper trigger fires in Tulsa, OK."""
     ip, host = "173.245.10.88", "outpost-tulsa-ok.cia.gov"
     return ("Tulsa, OK — Doug McKenna's Treadstone sleeper activation", [
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009107: IDS:9107 Treadstone Sleeper Activation Beacon from "+ip+" to 10.12.5.100 on interface outside [ASSET:ASSET-MCKENNA]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["sleeper"], ip, "10.12.5.100"),
         _duo_line("duo-authproxy02.cia.gov", "d.mckenna", "TREADSTONE", "Treadstone Sleeper Activation Portal", ip, "success", "user_approved"),
         _win_line("OUTCOME-WS04", {"EventID": 4672, "Event": "Special privileges assigned to new logon",
                   "SubjectUserName": "doug.mckenna", "PrivilegeList": "SeDebugPrivilege, SeTcbPrivilege"}),
@@ -1809,7 +1942,7 @@ def sc_seoul_pak_awakening():
     ip, host = "121.78.55.12", "station-seoul-01.cia.gov"
     return ("Seoul — SoYun Pak's Treadstone sleeper activation", [
         _dns_line(host, "10.11.5.100", "beacon.treadstone.example.net", "TXT", sev=4),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009107: IDS:9107 Treadstone Sleeper Activation Beacon from "+ip+" to 10.11.5.100 on interface outside [ASSET:ASSET-PAK]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["sleeper"], ip, "10.11.5.100"),
         _duo_line("duo-authproxy01.cia.gov", "t.coleman", "BLACKBRIAR", "Treadstone Sleeper Activation Portal", "10.0.1.10", "success", "user_approved"),
         _http_line(host, "10.11.5.100", "matt.edwards", "GET", "/intel/db/search?q=pak+soyun", 200, 9021),
         _ssh_line(host, "Accepted publickey for soyun.pak from "+ip+" port 51023 ssh2: RSA SHA256:"+_fake_sha256()),
@@ -1821,7 +1954,7 @@ def sc_petra_handler_betrayal():
     return ("Petra — rogue handler issues a kill order on McKenna", [
         _duo_line("duo-authproxy02.cia.gov", "p.hollander", "HOSTILE", "Asset Tracker (CLASSIFIED)", ip, "fraud", "user_marked_fraud"),
         _sudo_line("blackbriar-db01.cia.gov", "petra", "/opt/blackbriar/bin/authorize_kill.py --target doug.mckenna --asset ASSET-MCKENNA"),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009100: IDS:9100 Blackbriar Kill-Order C2 Channel from "+ip+" to 10.12.5.100 on interface outside [ASSET:ASSET-MCKENNA]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["c2"], ip, "10.12.5.100"),
         _ssh_line("outpost-tulsa-ok.cia.gov", "Failed password for invalid user petra from "+ip+" port 52341 ssh2", sev=4),
     ])
 
@@ -1875,7 +2008,7 @@ def sc_edr_reverse_shell_petra():
     return ("EDR — Petra drops a netcat reverse shell on McKenna's host", [
         _edr_line(proc_event, sev=2),
         _edr_line(net_event, sev=2),
-        _asa_line("noc-ids01.cia.gov", "ASA400", "%ASA-2-4009100: IDS:9100 Blackbriar Kill-Order C2 Channel from "+ip+" to 10.12.5.100 on interface outside [ASSET:ASSET-MCKENNA]", sev=2),
+        _panw_ids_line("noc-ids01.cia.gov", PANW_NARRATIVE_SIGNATURES["c2"], ip, "10.12.5.100"),
     ])
 
 def sc_edr_mimikatz_langley():
@@ -1935,11 +2068,10 @@ SCENARIOS: list[Callable[[], tuple]] = [
 
 GENERATORS: list[tuple[int, Callable[[], str]]] = [
     # (weight, generator_fn)
-    (25, gen_asa_connection_built),
-    (15, gen_asa_connection_teardown),
-    (15, gen_asa_deny),
-    (10, gen_asa_vpn_auth),
-    (5,  gen_asa_ids_alert),
+    (35, gen_panw_traffic),
+    (15, gen_panw_deny),
+    (10, gen_panw_globalprotect),
+    (5,  gen_panw_threat),
     (10, gen_ssh_auth),
     (5,  gen_sudo_event),
     (5,  gen_pam_session),
@@ -1947,6 +2079,7 @@ GENERATORS: list[tuple[int, Callable[[], str]]] = [
     (3,  gen_cron_job),
     (2,  gen_kernel_audit),
     (10, gen_duo_auth),
+    (3,  gen_duo_admin),
     (10, gen_web_proxy),
     (12, gen_dns_query),
     (4,  gen_email_threat),

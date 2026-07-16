@@ -1,33 +1,48 @@
 # Treadstone Detections — SentinelOne PowerQuery
 
 Detections for the simulator scenarios. **Scope every query by `msgid`** (the
-in-band router that survives DataPipeline on every event, text or JSON), then:
-- **JSON sources** (Duo/Email/Windows) → query the **expanded fields**
-- **Text sources** (ASA/DNS/pgAudit/Squid/…) → match/`parse` the raw **`message`**
+in-band router that survives DataPipeline on every event, text or JSON), then
+query the **expanded fields** — every source is pre-parsed in the DataPipeline
+Lua stage now (`datapipeline/parse_json_by_msgid.lua`), JSON sources via
+`json.decode` and text sources via pattern-match, so no detection needs a
+PowerQuery `parse` clause at query time. See `TREADSTONE_PIPELINE.md`.
 
 ## Field reference
 
 DataPipeline expands the JSON sources' keys to top-level fields (confirmed from a
-live Duo event); Email and Windows expand the same way. Text sources keep the raw
-line in `message`.
+live Duo event); Mimecast, Windows, Zscaler, CloudTrail, and Palo Alto expand the
+same way. Text sources get a namespaced field table extracted by the Lua stage's
+pattern-matchers (e.g. `dns.qname`, `dbaudit.rows`) — `message` still carries the
+raw line too, as a fallback. All field names below are grounded in this tenant's
+own deployed rules (`data/extracted.json`) where a real rule exists, or in the
+generator's own text format otherwise — see `TREADSTONE_PIPELINE.md`.
 
 | Source (`msgid`) | Fields you query |
 |---|---|
-| `DUO` | `result`, `reason`, `factor`, `email`, `user.name`, `access_device.ip`, `access_device.location.country`, `auth_device.ip`, `application.name` |
+| `DUO` (authentication) | `status`, `status_detail`, `unmapped.event_type`, `unmapped.factor`, `email`, `user.name`, `access_device.ip`, `access_device.location.country`, `auth_device.ip`, `application.name` |
+| `DUO` (administrator) | `unmapped.eventtype = 'administrator'`, `unmapped.action`, `unmapped.description`, `user.name` |
 | `EMAIL` (Mimecast) | `direction`, `status_detail`, `actor.invoked_by`, `event.type`, `email.from`, `email.to`, `email.subject`, `unmapped.category`, `unmapped.action`, `unmapped.taggedMalicious`, `file.type`, `file.name` |
-| `WINEVENT` | `EventID`, `TicketEncryptionType`, `TargetUserName`, `ServiceName`, `IpAddress`, `LogonType`, `CommandLine`, `SubjectUserName`, `Computer` |
+| `WINEVENT` | `winEventLog.id`, `winEventLog.channel`, `winEventLog.description`, `winEventLog.data.event.eventData.targetUserName`, `.serviceName`, `.ticketEncryptionType`, `.ipAddress`, `.logonType`, `.commandLine`, `.subjectUserName`, `Computer` |
 | `CLOUDTRAIL` | `eventName`, `eventSource`, `sourceIPAddress`, `recipientAccountId`, `errorCode`, `userIdentity.type`, `userIdentity.arn`, `userIdentity.sessionContext.attributes.mfaAuthenticated`, `requestParameters.*` |
 | `PROXY` (Zscaler) | `action`, `app_name`, `risk_details`, `http_request.url.hostname`, `http_request.url.categories`, `malware.name`, `unmapped.event.threatcat` |
+| `PANW` (Palo Alto) | `metadata.log_name` (TRAFFIC/THREAT), `activity_name` (GLOBALPROTECT), `app_name`, `action`, `unmapped.action`, `unmapped.sub_type`, `unmapped.threat_category`, `unmapped.url_category`, `unmapped.severity`, `threat.name`, `src_endpoint.ip`, `dst_endpoint.ip`, `dst_endpoint.port`, `status` |
 | `S1EDR` | `event.type`, `endpoint.os`, `endpoint.name`, `tgt.process.cmdline`, `tgt.process.name`, `src.process.cmdline`, `src.process.parent.name`, `tgt.file.path`, `registry.keyPath`, `task.path`, `module.path`, `cmdScript.content`, `event.dns.request`, `indicator.name` |
-| text (`ASA*`,`DNS`,`DBAUDIT`,`SSHD`,`SUDO`,`PAM`,`HTTP`,`CRON`,`AUDIT`) | raw line in `message` |
+| `DNS` | `dns.clientIp`, `dns.qname`, `dns.qtype`, `dns.resolver`, `dns.port` |
+| `DBAUDIT` | `dbaudit.user`, `dbaudit.db`, `dbaudit.class`, `dbaudit.command`, `dbaudit.table`, `dbaudit.statement`, `dbaudit.rows`, `dbaudit.sessionId` |
+| `SSHD` | `sshd.result` (accepted/failed), `sshd.method`, `sshd.user`, `sshd.sourceIp`, `sshd.port`, `sshd.invalidUser` |
+| `SUDO` | `sudo.user`, `sudo.tty`, `sudo.runAsUser`, `sudo.command` |
+| `PAM` | `pam.service`, `pam.action` (opened/closed), `pam.user` |
+| `HTTP` | `http.clientIp`, `http.user`, `http.method`, `http.path`, `http.status`, `http.bytes`, `http.userAgent` |
+| `CRON` | `cron.user`, `cron.command` |
+| `AUDIT` | `audit.srcIp`, `audit.dstIp`, `audit.proto`, `audit.srcPort`, `audit.dstPort` |
 | every source | `dataSource.name`, `dataSource.category` — see `TREADSTONE_PIPELINE.md`'s tagging table |
 
 > **If a JSON-source query returns zero, it's one of two things:**
-> 1. **`EventID` typed as a string** → change `EventID = 4769` to `EventID = '4769'`. (Probe: `msgid='WINEVENT' | group n=count() by EventID`.)
-> 2. **Keys nested under a prefix** (e.g. `event.result` not `result`) → prefix the field paths. (Probe: `msgid='DUO' | group n=count() by result`.)
+> 1. **A numeric ID typed as a string** → change `winEventLog.id = 4769` to `winEventLog.id = '4769'`. (Probe: `msgid='WINEVENT' | group n=count() by winEventLog.id`.)
+> 2. **Keys nested under a prefix** (e.g. `unmapped.event_type` not `event_type`) → prefix the field paths. (Probe: `msgid='DUO' | group n=count() by status`.)
 >
 > Both are also dodgeable entirely by matching the kept raw `message`, e.g.
-> `msgid='WINEVENT' | filter message contains '"EventID":4769'` — works regardless of parsed type.
+> `msgid='WINEVENT' | filter message contains '"id":4769'` — works regardless of parsed type.
 
 ---
 
@@ -53,60 +68,59 @@ msgid = 'EMAIL' event.type = 'TTP Impersonation Protection' unmapped.taggedMalic
 | sort -hits
 ```
 
-### A2 — DNS beaconing to a C2 / dead-drop domain  ·  T1071.004  *(text → message)*
-> `parse` treats its literals as regex, so we anchor on paren-free landmarks
-> (`#` and ` query: … IN`) instead of the `(qname)` parens.
+### A2 — DNS beaconing to a C2 / dead-drop domain  ·  T1071.004  *(text, pipeline-parsed)*
+> `dns.qname`/`dns.clientIp` are extracted in the DataPipeline Lua stage now
+> (`parse_json_by_msgid.lua`'s `parseDNS`), not with a PowerQuery `parse`
+> clause at query time — see `TREADSTONE_PIPELINE.md`'s text-parsing section.
 ```
 msgid = 'DNS'
-| filter message contains ('beacon.', 'c2.', 'deaddrop', 'sigint-cache', 'exfil-relay')
-| parse 'client @$cid$ $client_ip$#' from message
-| parse 'query: $qname$ IN' from message
-| group queries=count() by client_ip, qname
+| filter dns.qname contains ('beacon.', 'c2.', 'deaddrop', 'sigint-cache', 'exfil-relay')
+| group queries=count() by dns.clientIp, dns.qname
 | filter queries >= 3
 | sort -queries
 ```
 
-### A3 — DNS tunneling exfiltration (long high-entropy labels)  ·  T1048.003  *(text)*
+### A3 — DNS tunneling exfiltration (long high-entropy labels)  ·  T1048.003  *(text, pipeline-parsed)*
 ```
 msgid = 'DNS'
-| parse 'client @$cid$ $client_ip$#' from message
-| parse 'query: $qname$ IN $qtype$' from message
-| filter qname matches '[a-z2-7]{20,}\\.[a-z2-7]{6,}\\.exfil'
-| group lookups=count(), sample=any(qname) by client_ip
+| filter dns.qname matches '[a-z2-7]{20,}\\.[a-z2-7]{6,}\\.exfil'
+| group lookups=count(), sample=any(dns.qname) by dns.clientIp
 | sort -lookups
 ```
 
 ### A4 — Kerberoasting (RC4 service ticket)  ·  T1558.003
 ```
-msgid = 'WINEVENT' EventID = 4769 TicketEncryptionType = '0x17'
-| group tickets=count(), services=array_agg_distinct(ServiceName, 10) by TargetUserName
+msgid = 'WINEVENT' winEventLog.id = 4769 winEventLog.data.event.eventData.ticketEncryptionType = '0x17'
+| group tickets=count(), services=array_agg_distinct(winEventLog.data.event.eventData.serviceName, 10)
+  by winEventLog.data.event.eventData.targetUserName
 | sort -tickets
 ```
 
-### A5 — Mass database extraction  ·  T1213  *(text → message)*
+### A5 — Mass database extraction  ·  T1213  *(text, pipeline-parsed)*
+> `dbaudit.*` is extracted in the DataPipeline Lua stage now (`parseDBAUDIT`),
+> not with PowerQuery `parse` clauses at query time.
 ```
 msgid = 'DBAUDIT'
-| filter message contains ',SELECT,' && message matches 'rows=[0-9]{4,}'
-| parse '$dbuser$@$db$ LOG:' from message
-| parse ',TABLE,$obj$,' from message
-| group big_reads=count(), tables=array_agg_distinct(obj, 10) by dbuser
+| filter dbaudit.command = 'SELECT' && dbaudit.rows >= 1000
+| group big_reads=count(), tables=array_agg_distinct(dbaudit.table, 10) by dbaudit.user
 | sort -big_reads
 ```
 
 ### A6a — Password spray (one source IP, many accounts failing)  ·  T1110.003
 ```
-msgid = 'WINEVENT' EventID = 4625
-| group fails=count() by IpAddress, TargetUserName
-| group distinct_users=count(), total_fails=sum(fails) by IpAddress
+msgid = 'WINEVENT' winEventLog.id = 4625
+| group fails=count() by winEventLog.data.event.eventData.ipAddress, winEventLog.data.event.eventData.targetUserName
+| group distinct_users=count(), total_fails=sum(fails) by winEventLog.data.event.eventData.ipAddress
 | filter distinct_users >= 3
 | sort -total_fails
 ```
 
 ### A6b — Credential dumping (mimikatz)  ·  T1003
 ```
-msgid = 'WINEVENT' EventID = 4688
-| filter CommandLine contains 'mimikatz' || CommandLine contains 'sekurlsa'
-| group hits=count(), commands=array_agg_distinct(CommandLine, 5) by Computer, SubjectUserName
+msgid = 'WINEVENT' winEventLog.id = 4688
+| filter winEventLog.data.event.eventData.commandLine contains 'mimikatz' || winEventLog.data.event.eventData.commandLine contains 'sekurlsa'
+| group hits=count(), commands=array_agg_distinct(winEventLog.data.event.eventData.commandLine, 5)
+  by Computer, winEventLog.data.event.eventData.subjectUserName
 | sort -hits
 ```
 
@@ -116,7 +130,7 @@ msgid = 'WINEVENT' EventID = 4688
 
 ### B1 — Impossible travel: one identity, successful MFA from 2+ countries  ·  T1078
 ```
-msgid = 'DUO' result = 'success'
+msgid = 'DUO' status = 'success'
 | group logins=count() by email, country=access_device.location.country
 | group distinct_countries=count(), countries=array_agg_distinct(country, 10) by email
 | filter distinct_countries >= 2
@@ -131,7 +145,7 @@ msgid = 'DUO' result = 'success'
     (msgid = 'EMAIL'
        | group 1 by email=email.to),
     (msgid = 'DUO'
-       | filter result = 'fraud' || reason = 'anomalous_push'
+       | filter status = 'fraud' || status_detail = 'anomalous_push'
        | group bad_auths=count() by email)
   on email
 ```
@@ -139,11 +153,9 @@ msgid = 'DUO' result = 'success'
 ### B3 — Beacon + fraud from the same foreign IP
 ```
 | join
-    (msgid contains 'ASA'
-       | filter message contains 'Treadstone Asset Beacon Detected'
-       | parse 'Detected from $ip$ to' from message
-       | group beacons=count() by ip),
-    (msgid = 'DUO' result = 'fraud'
+    (msgid = 'PANW' unmapped.sub_type = 'vulnerability' threat.name = 'Treadstone Asset Beacon Detected'
+       | group beacons=count() by ip=src_endpoint.ip),
+    (msgid = 'DUO' status = 'fraud'
        | group frauds=count() by ip=access_device.ip)
   on ip
 ```
@@ -165,22 +177,20 @@ msgid = 'DUO' result = 'success'
 
 ---
 
-## C. Film-scenario signatures  *(text → message)*
+## C. Film-scenario signatures  *(mostly text → message; C1 is the PANW JSON exception)*
 
 ### C1 — Blackbriar kill-order C2 channel  (*Waterloo / Paris / Tangier*)
 ```
-msgid contains 'ASA'
-| filter message contains 'Blackbriar Kill-Order C2 Channel'
-| parse 'Channel from $src$ to $dst$ on' from message
-| group hits=count(), dsts=array_agg_distinct(dst, 5) by src
+msgid = 'PANW' unmapped.sub_type = 'vulnerability' threat.name = 'Blackbriar Kill-Order C2 Channel'
+| group hits=count(), dsts=array_agg_distinct(dst_endpoint.ip, 5) by src=src_endpoint.ip
 | sort -hits
 ```
 
 ### C2 — Authorize-kill command on a handler workstation
 ```
 msgid = 'SUDO'
-| filter message contains 'authorize_kill.py'
-| group hits=count(), commands=array_agg_distinct(message, 5) by host
+| filter sudo.command contains 'authorize_kill.py'
+| group hits=count(), commands=array_agg_distinct(sudo.command, 5) by host
 | sort -hits
 ```
 
@@ -293,7 +303,7 @@ To turn a hunt into a STAR / Custom Detection / PowerQuery Alert:
   All detections here now end in `group … | sort`, so they're alert-ready.
 - Keep intermediate and output ≤ **1,000 rows / 1 MB**; no `nolimit`, `compare`, `transpose`.
 - Emit **one row per finding** with stable columns the engine maps to alert fields
-  (e.g. `timestamp`, `host`, and the entity — `email` / `IpAddress` / `dbuser`).
+  (e.g. `timestamp`, `host`, and the entity — `email` / `src_endpoint.ip` / `dbuser`).
 - Keep the initial filter tight (`msgid = '…'` is exactly that) — it gates cost.
 - Tune the thresholds (`queries >= 3`, `distinct_users >= 3`, `rows >= 1000`,
   `distinct_countries >= 2`) to your baseline once you see normal volume.
